@@ -17,6 +17,12 @@ export interface TerrainElevationConfig {
 }
 
 export class OrganicTerrainBuilder {
+  private static cachedTextures: {
+    albedo: THREE.CanvasTexture;
+    normal: THREE.CanvasTexture;
+    roughness: THREE.CanvasTexture;
+  } | null = null;
+
   /**
    * Generates a photorealistic PBR competition grass texture suite (Albedo, Normal, Roughness)
    * with organic multi-octave non-directional fractal noise, rich European chlorophyll undertones,
@@ -27,7 +33,11 @@ export class OrganicTerrainBuilder {
     normal: THREE.CanvasTexture;
     roughness: THREE.CanvasTexture;
   } {
-    const size = 1024;
+    if (this.cachedTextures) {
+      return this.cachedTextures;
+    }
+
+    const size = 512;
     const aCanvas = document.createElement('canvas');
     aCanvas.width = size;
     aCanvas.height = size;
@@ -101,19 +111,19 @@ export class OrganicTerrainBuilder {
         const macroFactor = Math.min(1.0, Math.max(0.0, (o1 + 0.85) / 1.7));
 
         // Authentic European Championship Racing Turf Palette (Silverstone, Spa-Francorchamps, Monza)
-        // Root bed & humus undertone: rgb(32, 60, 26)
-        // Dense tournament turf base: rgb(46, 92, 38)
-        // Sun-drenched chlorophyll blade: rgb(68, 134, 52)
-        // Warm fescue & rye highlights: rgb(84, 152, 60)
-        let r = 32 + normH * 36 + macroFactor * 16;
-        let g = 60 + normH * 72 + macroFactor * 24;
-        let b = 26 + normH * 26 + macroFactor * 10;
+        // Deep root bed & rich dark humus soil: rgb(12, 22, 10)
+        // Dense tournament turf base: rgb(18, 38, 16)
+        // Natural chlorophyll blade midtone: rgb(26, 56, 22)
+        // Sun-drenched muted forest/emerald crown: rgb(38, 76, 28)
+        let r = 14 + normH * 22 + macroFactor * 8;
+        let g = 26 + normH * 44 + macroFactor * 14;
+        let b = 12 + normH * 16 + macroFactor * 4;
 
         // High-frequency micro-blade organic stippling
-        const jitter = (Math.random() - 0.5) * 8;
-        r = Math.min(255, Math.max(0, Math.floor(r + jitter * 0.5)));
-        g = Math.min(255, Math.max(0, Math.floor(g + jitter * 1.0)));
-        b = Math.min(255, Math.max(0, Math.floor(b + jitter * 0.4)));
+        const jitter = (Math.random() - 0.5) * 6;
+        r = Math.min(255, Math.max(0, Math.floor(r + jitter * 0.4)));
+        g = Math.min(255, Math.max(0, Math.floor(g + jitter * 0.8)));
+        b = Math.min(255, Math.max(0, Math.floor(b + jitter * 0.3)));
 
         const idx = (y * size + x) * 4;
         ad[idx] = r;
@@ -121,8 +131,8 @@ export class OrganicTerrainBuilder {
         ad[idx + 2] = b;
         ad[idx + 3] = 255;
 
-        // Velvety organic roughness: 0.76 to 0.88 (healthy turf with subtle grazing sunlight sheen)
-        const roughVal = Math.floor((0.76 + (1.0 - normH) * 0.12 + (Math.random() - 0.5) * 0.04) * 255);
+        // Velvety organic roughness: 0.80 to 0.92 (healthy turf with subtle grazing sunlight sheen)
+        const roughVal = Math.floor((0.80 + (1.0 - normH) * 0.12 + (Math.random() - 0.5) * 0.03) * 255);
         rd[idx] = roughVal;
         rd[idx + 1] = roughVal;
         rd[idx + 2] = roughVal;
@@ -133,10 +143,10 @@ export class OrganicTerrainBuilder {
     aCtx.putImageData(albedoImg, 0, 0);
     rCtx.putImageData(roughImg, 0, 0);
 
-    // Isotropic Sobel Normal Map (soft micro-relief to diffuse direct sunlight naturally)
+    // Isotropic Sobel Normal Map (crisp micro-relief to diffuse direct sunlight naturally and break flat specular glare)
     const normalImg = nCtx.createImageData(size, size);
     const nd = normalImg.data;
-    const normalStrength = 1.6;
+    const normalStrength = 2.4;
 
     for (let y = 0; y < size; y++) {
       const yPrev = (y - 1 + size) % size;
@@ -170,25 +180,26 @@ export class OrganicTerrainBuilder {
     const albedoTex = new THREE.CanvasTexture(aCanvas);
     albedoTex.wrapS = THREE.RepeatWrapping;
     albedoTex.wrapT = THREE.RepeatWrapping;
-    albedoTex.repeat.set(36, 36);
+    albedoTex.repeat.set(56, 56);
     albedoTex.anisotropy = 16;
     albedoTex.generateMipmaps = true;
 
     const normalTex = new THREE.CanvasTexture(nCanvas);
     normalTex.wrapS = THREE.RepeatWrapping;
     normalTex.wrapT = THREE.RepeatWrapping;
-    normalTex.repeat.set(36, 36);
+    normalTex.repeat.set(56, 56);
     normalTex.anisotropy = 16;
     normalTex.generateMipmaps = true;
 
     const roughTex = new THREE.CanvasTexture(rCanvas);
     roughTex.wrapS = THREE.RepeatWrapping;
     roughTex.wrapT = THREE.RepeatWrapping;
-    roughTex.repeat.set(36, 36);
+    roughTex.repeat.set(56, 56);
     roughTex.anisotropy = 16;
     roughTex.generateMipmaps = true;
 
-    return { albedo: albedoTex, normal: normalTex, roughness: roughTex };
+    this.cachedTextures = { albedo: albedoTex, normal: normalTex, roughness: roughTex };
+    return this.cachedTextures;
   }
 
   /**

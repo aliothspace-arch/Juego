@@ -42,6 +42,13 @@ export class CarModel {
   private brakeDiscs: THREE.Mesh[] = [];
   private tireStripeMaterials: THREE.MeshStandardMaterial[] = [];
   private tireMeshList: THREE.Mesh[] = [];
+  private spokeMeshes: THREE.Mesh[] = [];
+  private spokeMaterials: THREE.MeshStandardMaterial[] = [];
+  private wheelBlurMeshes: THREE.Mesh[] = [];
+  private wheelBlurMaterials: THREE.MeshStandardMaterial[] = [];
+  private currentTireCompoundColor: string = '#ef4444';
+  private currentBlurOpacity: number = 0;
+  private currentTireTemp: number[] = [0, 0, 0, 0];
 
   // Aerodynamic Wing and Deformable Mesh Elements
   private wingGroup!: THREE.Group;
@@ -906,6 +913,8 @@ export class CarModel {
   }
 
   private static sidewallTextureCache = new Map<string, THREE.CanvasTexture>();
+  private static radialBlurTextureCache = new Map<string, THREE.CanvasTexture>();
+  private static sharedTreadNormalTexture?: THREE.CanvasTexture;
 
   /**
    * Deep cleanup of static cached tire textures
@@ -913,6 +922,160 @@ export class CarModel {
   public static clearTireTextureCache(): void {
     CarModel.sidewallTextureCache.forEach((tex) => tex.dispose());
     CarModel.sidewallTextureCache.clear();
+    CarModel.radialBlurTextureCache.forEach((tex) => tex.dispose());
+    CarModel.radialBlurTextureCache.clear();
+    if (CarModel.sharedTreadNormalTexture) {
+      CarModel.sharedTreadNormalTexture.dispose();
+      CarModel.sharedTreadNormalTexture = undefined;
+    }
+  }
+
+  /**
+   * Procedural High-Speed Radial Motion Blur Texture for Rims and Sidewalls
+   * Blends rotating metallic brushed highlights, compound speed rings, and semi-transparent
+   * spoke fan to eliminate temporal wagon-wheel aliasing and transmit blistering rotational velocity.
+   */
+  private createWheelRadialBlurTexture(compoundColor: string): THREE.CanvasTexture {
+    if (CarModel.radialBlurTextureCache.has(compoundColor)) {
+      return CarModel.radialBlurTextureCache.get(compoundColor)!;
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 512;
+    const ctx = canvas.getContext('2d')!;
+    const cx = 256;
+    const cy = 256;
+
+    ctx.clearRect(0, 0, 512, 512);
+
+    // 1. Sidewall Compound High-Speed Color Blur Ring (R: 165 to 205)
+    const ringGrad = ctx.createRadialGradient(cx, cy, 160, cx, cy, 210);
+    ringGrad.addColorStop(0.0, 'rgba(20, 20, 24, 0.0)');
+    ringGrad.addColorStop(0.25, compoundColor + '55');
+    ringGrad.addColorStop(0.55, compoundColor + 'dd');
+    ringGrad.addColorStop(0.85, compoundColor + '88');
+    ringGrad.addColorStop(1.0, 'rgba(20, 20, 24, 0.0)');
+    ctx.fillStyle = ringGrad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 210, 0, Math.PI * 2);
+    ctx.fill();
+
+    // High-speed white sponsor text blur streaks (Pirelli motion trail)
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.40)';
+    ctx.lineWidth = 14;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 185, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 168, 0, Math.PI * 2);
+    ctx.arc(cx, cy, 200, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 2. Forged Rim Barrel Outer Lip Anisotropic Metallic Ring (R: 140 to 162)
+    const rimLipGrad = ctx.createRadialGradient(cx, cy, 138, cx, cy, 162);
+    rimLipGrad.addColorStop(0.0, 'rgba(28, 30, 36, 0.85)');
+    rimLipGrad.addColorStop(0.4, 'rgba(64, 68, 80, 0.95)');
+    rimLipGrad.addColorStop(0.7, 'rgba(120, 128, 148, 0.80)');
+    rimLipGrad.addColorStop(1.0, 'rgba(20, 22, 26, 0.90)');
+    ctx.fillStyle = rimLipGrad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 162, 0, Math.PI * 2);
+    ctx.arc(cx, cy, 138, 0, Math.PI * 2, true);
+    ctx.fill();
+
+    // 3. 10-Spoke BBS High-Speed Spinning Fan with Anisotropic Radial Highlights
+    // Semi-transparent (alpha ~0.55-0.70) so glowing carbon brake discs and Brembo calipers show through
+    const spokeFanGrad = ctx.createRadialGradient(cx, cy, 40, cx, cy, 140);
+    spokeFanGrad.addColorStop(0.0, 'rgba(22, 24, 28, 0.85)');
+    spokeFanGrad.addColorStop(0.3, 'rgba(38, 42, 50, 0.72)');
+    spokeFanGrad.addColorStop(0.65, 'rgba(52, 56, 68, 0.65)');
+    spokeFanGrad.addColorStop(0.92, 'rgba(32, 34, 42, 0.78)');
+    spokeFanGrad.addColorStop(1.0, 'rgba(18, 20, 24, 0.0)');
+    ctx.fillStyle = spokeFanGrad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 140, 0, Math.PI * 2);
+    ctx.arc(cx, cy, 40, 0, Math.PI * 2, true);
+    ctx.fill();
+
+    // Metallic brushed radial streaks (Anisotropic specular rings)
+    for (let r = 50; r <= 135; r += 9) {
+      const alpha = 0.12 + Math.sin(r * 0.4) * 0.08;
+      ctx.strokeStyle = `rgba(180, 195, 220, ${alpha})`;
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // 4. Centerlock Nut Hub Shadow & Retention Ring
+    const hubGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, 42);
+    hubGrad.addColorStop(0.0, 'rgba(10, 12, 16, 0.95)');
+    hubGrad.addColorStop(0.7, 'rgba(18, 20, 26, 0.80)');
+    hubGrad.addColorStop(1.0, 'rgba(24, 26, 32, 0.0)');
+    ctx.fillStyle = hubGrad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 42, 0, Math.PI * 2);
+    ctx.fill();
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.generateMipmaps = true;
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.anisotropy = 16;
+    tex.colorSpace = THREE.SRGBColorSpace;
+
+    CarModel.radialBlurTextureCache.set(compoundColor, tex);
+    return tex;
+  }
+
+  /**
+   * Procedural Competition Slick Tread Micro-Texture & Normal Map
+   * Provides realistic directional optical flow, mold parting lines, and vulcanized rubber pores.
+   */
+  private static getTreadNormalTexture(): THREE.CanvasTexture {
+    if (CarModel.sharedTreadNormalTexture) return CarModel.sharedTreadNormalTexture;
+
+    const size = 128;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d')!;
+    const img = ctx.createImageData(size, size);
+    const d = img.data;
+
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        // Circumferential directional grain (smooth along Y, fine micro-variation along X)
+        const grain = (Math.sin(x * 0.8) * 0.4 + Math.sin(x * 2.2) * 0.3) * (0.8 + Math.random() * 0.2);
+        const moldLine = Math.abs(x - size / 2) < 2 ? 0.8 : 0.0;
+        
+        const nx = (grain * 0.35 + moldLine * 0.4) * 0.6;
+        const ny = 0.0; // Clean directional flow along tire rotation
+        const nz = 1.0;
+        const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+        const idx = (y * size + x) * 4;
+        
+        d[idx] = Math.floor((nx / len * 0.5 + 0.5) * 255);
+        d[idx + 1] = Math.floor((ny / len * 0.5 + 0.5) * 255);
+        d[idx + 2] = Math.floor((nz / len * 0.5 + 0.5) * 255);
+        d[idx + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(4, 18);
+    tex.anisotropy = 16;
+    tex.generateMipmaps = true;
+
+    CarModel.sharedTreadNormalTexture = tex;
+    return tex;
   }
 
   /**
@@ -2498,6 +2661,12 @@ export class CarModel {
     this.tireStripeMaterials = [];
     this.tireMeshList = [];
     this.centerlockNuts = [];
+    this.spokeMeshes = [];
+    this.spokeMaterials = [];
+    this.wheelBlurMeshes = [];
+    this.wheelBlurMaterials = [];
+
+    const treadNormal = CarModel.getTreadNormalTexture();
 
     wheelPositions.forEach((wp) => {
       const pivot = new THREE.Group();
@@ -2509,7 +2678,7 @@ export class CarModel {
       const tireRadius = wp.isFront ? 0.33 : 0.35;
       const tireWidth = wp.isFront ? 0.30 : 0.38;
 
-      // 1. ROUNDED-SHOULDER COMPETITION SLICK TIRE
+      // 1. ROUNDED-SHOULDER COMPETITION SLICK TIRE WITH PBR TREAD NORMAL MAP
       const tireSegments = 28;
       const tireGeo = new THREE.CylinderGeometry(tireRadius, tireRadius, tireWidth, tireSegments, 6, false);
       tireGeo.rotateZ(Math.PI / 2);
@@ -2536,10 +2705,12 @@ export class CarModel {
       tireGeo.computeVertexNormals();
 
       const tireMat = new THREE.MeshStandardMaterial({
-        color: 0x141417,
-        roughness: 0.68,
+        color: 0x101114,
+        roughness: 0.65,
         metalness: 0.06,
-        envMapIntensity: 0.70,
+        normalMap: treadNormal,
+        normalScale: new THREE.Vector2(0.35, 0.35),
+        envMapIntensity: 0.55,
       });
       const tireMesh = new THREE.Mesh(tireGeo, tireMat);
       tireMesh.castShadow = true;
@@ -2548,7 +2719,7 @@ export class CarModel {
       this.tireMeshList.push(tireMesh);
 
       // 2. Pirelli P-Zero Competition Sidewall Identification Ring & Stencil
-      const sidewallTex = this.createTireSidewallTexture('#ef4444');
+      const sidewallTex = this.createTireSidewallTexture(this.currentTireCompoundColor);
       const pzeroGeo = new THREE.RingGeometry(tireRadius * 0.62, tireRadius * 0.98, 32);
       pzeroGeo.rotateY(wp.isRight ? Math.PI / 2 : -Math.PI / 2);
       const pzeroMat = new THREE.MeshStandardMaterial({
@@ -2558,6 +2729,7 @@ export class CarModel {
         envMapIntensity: 0.75,
         side: THREE.DoubleSide,
         transparent: true,
+        opacity: 1.0,
       });
       const pzeroRing = new THREE.Mesh(pzeroGeo, pzeroMat);
       pzeroRing.position.x = wp.isRight ? tireWidth / 2 + 0.004 : -tireWidth / 2 - 0.004;
@@ -2579,7 +2751,7 @@ export class CarModel {
       const barrel = new THREE.Mesh(barrelGeo, rimMat);
       rimGroup.add(barrel);
 
-      // 10 Sculpted Deep-Dish Concave Forged Spokes (Merged Single Batch)
+      // 10 Sculpted Deep-Dish Concave Forged Spokes (with dynamic motion fade)
       const spokeCount = 10;
       const spokeGeos: THREE.BufferGeometry[] = [];
       for (let s = 0; s < spokeCount; s++) {
@@ -2598,13 +2770,44 @@ export class CarModel {
         if (sGeo) spokeGeos.push(sGeo);
       }
       const mergedSpokes = safeMergeAndDispose(spokeGeos);
+      const spokeMat = new THREE.MeshStandardMaterial({
+        color: 0x1a1b20,
+        metalness: 0.94,
+        roughness: 0.20,
+        envMapIntensity: 1.30,
+        transparent: true,
+        opacity: 1.0,
+      });
       if (mergedSpokes) {
-        const spokeMesh = new THREE.Mesh(mergedSpokes, rimMat);
+        const spokeMesh = new THREE.Mesh(mergedSpokes, spokeMat);
         rimGroup.add(spokeMesh);
+        this.spokeMeshes.push(spokeMesh);
+        this.spokeMaterials.push(spokeMat);
       }
       wheelRotGroup.add(rimGroup);
 
-      // 4. Anodized Centerlock Wheel Nut (Blue on Right, Red on Left)
+      // 4. High-Speed Radial Motion Blur Disk (eliminates wagon wheel temporal aliasing)
+      const blurTex = this.createWheelRadialBlurTexture(this.currentTireCompoundColor);
+      const blurGeo = new THREE.RingGeometry(rimRadius * 0.20, tireRadius * 0.985, 36);
+      blurGeo.rotateY(wp.isRight ? Math.PI / 2 : -Math.PI / 2);
+      const blurMat = new THREE.MeshStandardMaterial({
+        map: blurTex,
+        roughness: 0.26,
+        metalness: 0.88,
+        envMapIntensity: 1.25,
+        transparent: true,
+        opacity: 0.0,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      });
+      const blurMesh = new THREE.Mesh(blurGeo, blurMat);
+      blurMesh.position.x = wp.isRight ? tireWidth / 2 + 0.006 : -tireWidth / 2 - 0.006;
+      blurMesh.visible = false;
+      wheelRotGroup.add(blurMesh);
+      this.wheelBlurMeshes.push(blurMesh);
+      this.wheelBlurMaterials.push(blurMat);
+
+      // 5. Anodized Centerlock Wheel Nut (Blue on Right, Red on Left)
       const nutGeo = new THREE.CylinderGeometry(0.045, 0.055, tireWidth + 0.025, 8);
       nutGeo.rotateZ(Math.PI / 2);
       const nutMat = new THREE.MeshStandardMaterial({
@@ -2616,7 +2819,7 @@ export class CarModel {
       wheelRotGroup.add(nut);
       this.centerlockNuts.push(nut);
 
-      // 5. Perforated Carbon-Ceramic Brake Disc (Shared Material)
+      // 6. Perforated Carbon-Ceramic Brake Disc (Shared Material)
       const discRadius = rimRadius * 0.82;
       const discGeo = new THREE.CylinderGeometry(discRadius, discRadius, 0.028, 20);
       discGeo.rotateZ(Math.PI / 2);
@@ -2624,7 +2827,7 @@ export class CarModel {
       this.brakeDiscs.push(disc);
       pivot.add(disc);
 
-      // 6. Brembo 6-Piston Caliper (Fluorescent Race Yellow)
+      // 7. Brembo 6-Piston Caliper (Fluorescent Race Yellow)
       const caliperGeo = new THREE.BoxGeometry(0.075, 0.14, 0.20);
       const caliperMat = new THREE.MeshStandardMaterial({
         color: 0xfacc15,
@@ -2635,7 +2838,7 @@ export class CarModel {
       caliper.position.set(wp.isRight ? -0.05 : 0.05, 0.06, 0.06);
       pivot.add(caliper);
 
-      // 7. Titanium Axle Spindle
+      // 8. Titanium Axle Spindle
       const spindleGeo = new THREE.CylinderGeometry(0.032, 0.032, 0.22, 10);
       spindleGeo.rotateZ(Math.PI / 2);
       const spindle = new THREE.Mesh(spindleGeo, this.mechanicalMetalMat);
@@ -2799,8 +3002,18 @@ export class CarModel {
 
   public setTireCompoundVisuals(compound: TireCompoundType): void {
     const config = TIRE_COMPOUNDS[compound] || TIRE_COMPOUNDS.soft;
+    const colorHexStr = `#${config.stripeColorHex.toString(16).padStart(6, '0')}`;
+    this.currentTireCompoundColor = colorHexStr;
+    const newSidewallTex = this.createTireSidewallTexture(colorHexStr);
+    const newBlurTex = this.createWheelRadialBlurTexture(colorHexStr);
     this.tireStripeMaterials.forEach((mat) => {
-      mat.color.setHex(config.stripeColorHex);
+      mat.map = newSidewallTex;
+      mat.color.setHex(0xffffff);
+      mat.needsUpdate = true;
+    });
+    this.wheelBlurMaterials.forEach((mat) => {
+      mat.map = newBlurTex;
+      mat.needsUpdate = true;
     });
   }
 
@@ -3039,7 +3252,15 @@ export class CarModel {
       }
     }
 
-    // 2. Dynamic Suspension Travel, Wheel Rolling & Puncture Deflation
+    // 2. Dynamic Suspension Travel, Wheel Rolling, Radial Motion Blur & Puncture Deflation
+    const absSpeed = Math.abs(speedKmh);
+    const blurTarget = THREE.MathUtils.clamp((absSpeed - 24.0) / 48.0, 0.0, 0.96);
+    this.currentBlurOpacity += (blurTarget - this.currentBlurOpacity) * Math.min(1.0, 20.0 * dt);
+    const blurOpacity = this.currentBlurOpacity;
+    const spokeOpacity = THREE.MathUtils.clamp(1.0 - blurOpacity * 0.88, 0.0, 1.0);
+    const sidewallOpacity = THREE.MathUtils.clamp(1.0 - blurOpacity * 0.82, 0.0, 1.0);
+    const aeroDownforce = Math.min(1.6, Math.pow(absSpeed / 160.0, 2.0));
+
     for (let i = 0; i < 4; i++) {
       const punctured = Boolean(isPunctured && isPunctured[i]);
       const wear = (tireWear && tireWear[i] !== undefined) ? tireWear[i] : 0;
@@ -3061,11 +3282,11 @@ export class CarModel {
         else if (i === 2) brokenCamber = damage.suspensionCamberRL || 0;
         else if (i === 3) brokenCamber = -(damage.suspensionCamberRR || 0);
 
-        const brokenWobble = (brokenCamber !== 0 && speedKmh > 3.0)
+        const brokenWobble = (brokenCamber !== 0 && absSpeed > 3.0)
           ? Math.sin(wheelRotations[i] * 2.0) * (Math.abs(brokenCamber) * 0.40)
           : 0;
 
-        if (punctured && speedKmh > 2) {
+        if (punctured && absSpeed > 2) {
           const flapFreq = wheelRotations[i] * 2.0;
           this.wheelPivots[i].rotation.z = (i % 2 === 0 ? -0.09 : 0.09) + Math.sin(flapFreq) * 0.04 + brokenCamber + brokenWobble;
         } else {
@@ -3078,7 +3299,7 @@ export class CarModel {
         }
       }
 
-      // Wheel Forward Roll
+      // Wheel Forward Roll & Dynamic Tire Contact Patch Squish (Vertical Deflection under Downforce)
       if (this.wheelMeshes[i]) {
         this.wheelMeshes[i].rotation.x = wheelRotations[i];
 
@@ -3086,26 +3307,82 @@ export class CarModel {
           const flatPulse = 0.76 + Math.sin(wheelRotations[i] * 2.0) * 0.04;
           this.wheelMeshes[i].scale.set(1.06, flatPulse, 1.06);
         } else {
-          this.wheelMeshes[i].scale.set(1.0, 1.0, 1.0);
+          const dynamicComp = (suspensionCompression && suspensionCompression[i] !== undefined) ? suspensionCompression[i] : 0;
+          const squish = Math.min(0.024, (1.0 + aeroDownforce) * 0.005 + Math.max(0, -dynamicComp) * 0.12);
+          this.wheelMeshes[i].scale.set(1.0 + squish * 0.32, 1.0 - squish * 0.50, 1.0 + squish * 0.20);
         }
       }
 
-      // Tire Roughness & Wear (State-cached to avoid per-frame material re-assignments)
+      // High-Velocity Radial Motion Blur & Spokes Cross-Fade
+      if (this.spokeMaterials[i]) {
+        this.spokeMaterials[i].opacity = spokeOpacity;
+      }
+      if (this.spokeMeshes[i]) {
+        this.spokeMeshes[i].visible = spokeOpacity > 0.04;
+      }
+      if (this.tireStripeMaterials[i]) {
+        this.tireStripeMaterials[i].opacity = sidewallOpacity;
+      }
+      if (this.wheelBlurMaterials[i]) {
+        this.wheelBlurMaterials[i].opacity = blurOpacity;
+      }
+      if (this.wheelBlurMeshes[i]) {
+        this.wheelBlurMeshes[i].visible = blurOpacity > 0.03;
+      }
+
+      // Thermodynamic Tire Temperature Evolution (Smooth organic heating and cooling)
+      const targetTemp = punctured ? 0.0 : THREE.MathUtils.clamp((absSpeed / 95.0) * 0.70 + (brake > 0.20 ? 0.30 : 0.0), 0.0, 1.0);
+      const tempRate = targetTemp > this.currentTireTemp[i] ? 1.8 : 0.7; // Responsive heating, progressive cooling
+      this.currentTireTemp[i] += (targetTemp - this.currentTireTemp[i]) * Math.min(1.0, tempRate * dt);
+      const thermalFactor = this.currentTireTemp[i];
+
+      // Dynamic Rubber Thermal PBR & Wear with continuous smooth color/roughness interpolation
       if (this.tireMeshList[i]) {
-        const visualState = punctured ? 2 : (wear > 75 ? 1 : 0);
-        if (this.cachedTireVisualStates[i] !== visualState) {
-          this.cachedTireVisualStates[i] = visualState;
-          const mat = this.tireMeshList[i].material as THREE.MeshStandardMaterial;
-          if (visualState === 2) {
-            mat.roughness = 0.98;
-            mat.color.setHex(0x111114);
-          } else if (visualState === 1) {
-            mat.roughness = 0.88;
-            mat.color.setHex(0x222226);
-          } else {
-            mat.roughness = 0.76;
-            mat.color.setHex(0x18181c);
+        const mat = this.tireMeshList[i].material as THREE.MeshStandardMaterial;
+        if (punctured) {
+          const pRate = Math.min(1.0, 6.0 * dt);
+          mat.roughness = THREE.MathUtils.lerp(mat.roughness, 0.96, pRate);
+          mat.metalness = THREE.MathUtils.lerp(mat.metalness, 0.02, pRate);
+          mat.color.r = THREE.MathUtils.lerp(mat.color.r, 0.018, pRate);
+          mat.color.g = THREE.MathUtils.lerp(mat.color.g, 0.019, pRate);
+          mat.color.b = THREE.MathUtils.lerp(mat.color.b, 0.022, pRate);
+        } else {
+          const wearFactor = THREE.MathUtils.clamp((wear - 45.0) / 50.0, 0.0, 1.0);
+          
+          // Authentic Motorsport Dark Rubber Gamut:
+          // Cold resting rubber: #101114 (r=0.024, g=0.026, b=0.030) - deep satin matte black
+          // Hot vulcanized racing rubber: #050608 (r=0.010, g=0.012, b=0.016) - intense pitch obsidian black with high specular gloss
+          // Heavy wear: #1c1e24 (r=0.042, g=0.044, b=0.052) - subtly dusted/weathered dark rubber
+          let targetR = THREE.MathUtils.lerp(0.024, 0.010, thermalFactor);
+          let targetG = THREE.MathUtils.lerp(0.026, 0.012, thermalFactor);
+          let targetB = THREE.MathUtils.lerp(0.030, 0.016, thermalFactor);
+          
+          if (wearFactor > 0.01) {
+            targetR = THREE.MathUtils.lerp(targetR, 0.042, wearFactor);
+            targetG = THREE.MathUtils.lerp(targetG, 0.044, wearFactor);
+            targetB = THREE.MathUtils.lerp(targetB, 0.052, wearFactor);
           }
+
+          // Cold = 0.65 roughness (satin matte), Hot = 0.22 roughness (glossy, reflective vulcanized sheen)
+          const targetRoughness = THREE.MathUtils.lerp(
+            THREE.MathUtils.lerp(0.65, 0.22, thermalFactor),
+            0.88,
+            wearFactor
+          );
+          // Cold = 0.06 metalness, Hot = 0.28 (crisp specular reflections catching sunlight)
+          const targetMetalness = THREE.MathUtils.lerp(
+            THREE.MathUtils.lerp(0.06, 0.28, thermalFactor),
+            0.02,
+            wearFactor
+          );
+
+          // Smooth frame-rate independent interpolation
+          const lerpRate = Math.min(1.0, 5.0 * dt);
+          mat.roughness += (targetRoughness - mat.roughness) * lerpRate;
+          mat.metalness += (targetMetalness - mat.metalness) * lerpRate;
+          mat.color.r += (targetR - mat.color.r) * lerpRate;
+          mat.color.g += (targetG - mat.color.g) * lerpRate;
+          mat.color.b += (targetB - mat.color.b) * lerpRate;
         }
       }
     }

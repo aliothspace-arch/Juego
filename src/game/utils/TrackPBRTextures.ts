@@ -56,10 +56,9 @@ const periodicNoise = (x: number, y: number, period: number): number => {
 
 /**
  * Generates authentic FIA competition asphalt PBR maps:
- * - Albedo: Rich bitumen base with darker rubberized racing groove and crushed granite chips
- * - Normal: Micro-facets of crushed aggregate stone chips bound in bitumen
- * - Roughness: Polished stone tops and rubberized racing line (0.24-0.34) catching sun glints & grazing sky reflections,
- *   with darker porous tar binder and off-line asphalt (0.72-0.82)
+ * - Albedo: Rich bitumen binder with multi-frequency crushed granite & basalt aggregate stone grain (zero artificial bands/stripes)
+ * - Normal: Crisp micro-facets of crushed aggregate stone chips bound in bitumen
+ * - Roughness: Physically accurate aggregate stone tops (0.64-0.72) and porous bitumen binder (0.84-0.92) for natural uniform micro-glints
  */
 export function getAsphaltPBRTextures(): PBRTextureSet {
   if (cachedAsphaltPBR) return cachedAsphaltPBR;
@@ -91,33 +90,26 @@ export function getAsphaltPBRTextures(): PBRTextureSet {
     for (let x = 0; x < size; x++) {
       const nx = x / size;
 
+      // Multi-frequency isotropic procedural stone aggregate noise (100% seamless, no directional bands)
       // Octave 1: Macro aggregate stone clusters (Period = 16)
       const stoneCluster = periodicNoise(nx * 16, ny * 16, 16);
       // Octave 2: Crushed granite stone chips (Period = 32)
       const stoneChips = periodicNoise(nx * 32, ny * 32, 32);
-      // Octave 3: Fine micro-grit and bitumen pores (Period = 64)
+      // Octave 3: Angular basalt grit and bitumen pores (Period = 64)
       const microPores = periodicNoise(nx * 64, ny * 64, 64);
       // Octave 4: High-frequency grain (Period = 128)
       const fineGrain = periodicNoise(nx * 128, ny * 128, 128);
+      // Octave 5: Micro-crystalline quartz speckle (Period = 256)
+      const quartzSpeckle = periodicNoise(nx * 256, ny * 256, 256);
 
-      const h = stoneCluster * 0.35 + stoneChips * 0.35 + microPores * 0.20 + fineGrain * 0.10;
+      const h = stoneCluster * 0.28 + stoneChips * 0.36 + microPores * 0.20 + fineGrain * 0.11 + quartzSpeckle * 0.05;
       heightField[y * size + x] = h;
 
       const normH = Math.min(1.0, Math.max(0.0, (h + 0.8) / 1.6));
 
-      // Realistic dual racing groove (two longitudinal rubberized tyre tracks where slicks scrub down rubber)
-      // Track 1 centered at nx ~ 0.30, Track 2 centered at nx ~ 0.70
-      const d1 = Math.abs(nx - 0.30);
-      const d2 = Math.abs(nx - 0.70);
-      const groove1 = Math.exp(-(d1 * d1) / (2 * 0.11 * 0.11));
-      const groove2 = Math.exp(-(d2 * d2) / (2 * 0.11 * 0.11));
-      const rubberIntensity = Math.min(1.0, groove1 * 0.85 + groove2 * 0.85);
-
-      // In the rubber groove: polished aggregate with rubber sheen (0.30 - 0.42), high grazing sky reflection
-      // Outside the groove: porous competition bitumen (0.68 - 0.78)
-      const baseRoughness = 0.74 - normH * 0.18;
-      const finalRoughness = THREE.MathUtils.lerp(baseRoughness, 0.32 + (1.0 - normH) * 0.10, rubberIntensity);
-      const rVal = Math.floor(finalRoughness * 255);
+      // Physically accurate roughness: Exposed stone aggregate crowns (0.64-0.70) vs porous bitumen matrix (0.84-0.90)
+      const roughnessVal = 0.88 - normH * 0.22;
+      const rVal = Math.floor(roughnessVal * 255);
       const clampedR = Math.min(255, Math.max(0, rVal));
 
       const idx = (y * size + x) * 4;
@@ -126,15 +118,15 @@ export function getAsphaltPBRTextures(): PBRTextureSet {
       rd[idx + 2] = clampedR;
       rd[idx + 3] = 255;
 
-      // Albedo: Darker rubberized racing line with mineral aggregate specks, neutral daylight grey off-line tarmac
-      const stoneBrightness = Math.floor(normH * 36);
-      const baseGrey = 86 + stoneBrightness;
-      const rubberedGrey = 52 + Math.floor(normH * 20);
-      const col = THREE.MathUtils.lerp(baseGrey, rubberedGrey, rubberIntensity);
+      // Albedo: Authentic FIA Daylight Racing Asphalt (Medium-dark neutral charcoal slate with visible aggregate grain)
+      // Granite chips (lighter grey with slight cool mineral tint) vs Basalt/Bitumen (dark slate charcoal)
+      const chipBrightness = Math.floor(normH * 32);
+      const quartzGlint = Math.max(0, quartzSpeckle) * 18;
+      const baseGrey = 56 + chipBrightness + Math.floor(quartzGlint);
 
-      ad[idx] = col;
-      ad[idx + 1] = col + Math.floor(stoneChips * 4); // subtle cool granite mineral tint
-      ad[idx + 2] = col + Math.floor(stoneChips * 6);
+      ad[idx] = baseGrey;
+      ad[idx + 1] = baseGrey + Math.floor(stoneChips * 3); // subtle natural granite mineral tone
+      ad[idx + 2] = baseGrey + Math.floor(stoneChips * 5);
       ad[idx + 3] = 255;
     }
   }
@@ -145,7 +137,7 @@ export function getAsphaltPBRTextures(): PBRTextureSet {
   // Tangent-Space Normal Map via 3x3 Sobel filter
   const normalImg = nCtx.createImageData(size, size);
   const nd = normalImg.data;
-  const normalStrength = 3.6;
+  const normalStrength = 3.2;
 
   for (let y = 0; y < size; y++) {
     const yPrev = (y - 1 + size) % size;

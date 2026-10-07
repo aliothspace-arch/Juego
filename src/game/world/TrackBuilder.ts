@@ -165,8 +165,12 @@ export class TrackBuilder {
     asphaltTex.magFilter = THREE.LinearFilter;
     asphaltTex.repeat.set(16, 16);
 
-    // Procedural PBR Physical Micro-Aggregate Normal & Roughness Maps
+    // Procedural PBR Physical Micro-Aggregate Normal, Roughness & Albedo Maps
     const asphaltPBR = getAsphaltPBRTextures();
+    const asphaltAlbedo = asphaltPBR.albedo ? asphaltPBR.albedo.clone() : asphaltTex;
+    asphaltAlbedo.repeat.set(16, 16);
+    asphaltAlbedo.needsUpdate = true;
+
     const asphaltNormal = asphaltPBR.normal.clone();
     asphaltNormal.repeat.set(16, 16);
     asphaltNormal.needsUpdate = true;
@@ -176,14 +180,13 @@ export class TrackBuilder {
     asphaltRough.needsUpdate = true;
 
     this.asphaltMat = new THREE.MeshStandardMaterial({
-      map: asphaltTex,
+      map: asphaltAlbedo,
       normalMap: asphaltNormal,
       normalScale: new THREE.Vector2(1.8, 1.8),
       roughnessMap: asphaltRough,
-      color: 0x424650, // Authentic daylight FIA racing asphalt (medium neutral grey, sharp high-contrast shadows)
-      roughness: 0.54, // Polished aggregate stone crowns reflect glancing sunlight with razor specular glints
+      roughness: 1.0,
       metalness: 0.05,
-      envMapIntensity: 0.18,
+      envMapIntensity: 0.35,
     });
 
     // Photorealistic PBR Racing Turf (Organic multi-frequency fractal noise, Sobel normal map & roughness)
@@ -191,11 +194,12 @@ export class TrackBuilder {
     this.grassMat = new THREE.MeshStandardMaterial({
       map: grassTextures.albedo,
       normalMap: grassTextures.normal,
-      normalScale: new THREE.Vector2(0.65, 0.65),
+      normalScale: new THREE.Vector2(1.8, 1.8),
       roughnessMap: grassTextures.roughness,
-      roughness: 0.90,
+      roughness: 0.85,
       metalness: 0.0,
-      envMapIntensity: 0.01,
+      envMapIntensity: 0.12,
+      color: new THREE.Color(0x82987a), // Calibrated natural dark European turf tint
     });
 
     // Runoff Gravel Trap Material with Micro-Pebble Normal Relief
@@ -376,14 +380,11 @@ export class TrackBuilder {
       envMapIntensity: 0.05,
       side: THREE.FrontSide,
     });
-    // High-Fidelity PBR Competition Turf Material with Vertex Color AO
-    this.grassTuftMat = new THREE.MeshStandardMaterial({
-      roughness: 0.94,
-      metalness: 0.0,
+    // High-Performance Competition Turf Material with Vertex Color AO
+    this.grassTuftMat = new THREE.MeshLambertMaterial({
       vertexColors: true,
-      side: THREE.DoubleSide,
-      envMapIntensity: 0.02,
-    });
+      side: THREE.FrontSide,
+    }) as any;
 
     // Stadium Floodlight Emissive Lens Material
     this.floodlightMat = new THREE.MeshStandardMaterial({
@@ -482,21 +483,21 @@ export class TrackBuilder {
         const macroFactor = Math.min(1.0, Math.max(0.0, (macro + 0.85) / 1.7));
 
         // Authentic European Grade-1 competition turf palette (Spa-Francorchamps / Red Bull Ring)
-        // Root base: rgb(22, 42, 20)
-        // Mid rich blade: rgb(32, 62, 28)
-        // Sunlit crown: rgb(48, 88, 38)
-        // Warm golden meadow accents: rgb(68, 96, 42)
-        let r = 22 + normH * 26 + macroFactor * 16;
-        let g = 42 + normH * 46 + macroFactor * 22;
-        let b = 20 + normH * 18 + macroFactor * 4;
+        // Root base: rgb(12, 22, 10)
+        // Mid rich blade: rgb(18, 38, 16)
+        // Sunlit crown: rgb(28, 56, 24)
+        // Muted forest accents: rgb(38, 68, 30)
+        let r = 12 + normH * 16 + macroFactor * 10;
+        let g = 22 + normH * 34 + macroFactor * 14;
+        let b = 10 + normH * 14 + macroFactor * 4;
 
         // Fine blade jitter and earthy soil flecks
-        const jitter = (Math.random() - 0.5) * 12;
-        const isGoldenTip = Math.random() > 0.94 ? 14 : 0;
+        const jitter = (Math.random() - 0.5) * 8;
+        const isGoldenTip = Math.random() > 0.94 ? 8 : 0;
 
-        r = Math.min(255, Math.max(0, Math.floor(r + jitter + isGoldenTip * 0.75)));
-        g = Math.min(255, Math.max(0, Math.floor(g + jitter + isGoldenTip * 1.15)));
-        b = Math.min(255, Math.max(0, Math.floor(b + jitter * 0.5)));
+        r = Math.min(255, Math.max(0, Math.floor(r + jitter + isGoldenTip * 0.5)));
+        g = Math.min(255, Math.max(0, Math.floor(g + jitter + isGoldenTip * 0.9)));
+        b = Math.min(255, Math.max(0, Math.floor(b + jitter * 0.4)));
 
         const idx = (y * size + x) * 4;
         ad[idx] = r;
@@ -504,8 +505,8 @@ export class TrackBuilder {
         ad[idx + 2] = b;
         ad[idx + 3] = 255;
 
-        // Roughness: 0.70 (velvety cut turf) to 0.88 (porous soil)
-        const roughVal = Math.floor((0.72 + (1.0 - normH) * 0.16 + (Math.random() - 0.5) * 0.03) * 255);
+        // Roughness: 0.80 (velvety cut turf) to 0.92 (porous soil)
+        const roughVal = Math.floor((0.80 + (1.0 - normH) * 0.12 + (Math.random() - 0.5) * 0.03) * 255);
         rd[idx] = roughVal;
         rd[idx + 1] = roughVal;
         rd[idx + 2] = roughVal;
@@ -899,10 +900,10 @@ export class TrackBuilder {
       ctx.closePath();
 
       const grad = ctx.createLinearGradient(0, 512, 0, tipY);
-      grad.addColorStop(0, '#153617'); // Dark mossy root
-      grad.addColorStop(0.35, '#26612a'); // Lush foliage green
-      grad.addColorStop(0.75, '#429440'); // Rich chlorophyll blade
-      grad.addColorStop(1.0, '#7ac85e'); // Sunlit golden tip
+      grad.addColorStop(0, '#0a1a0c'); // Deep dark root
+      grad.addColorStop(0.35, '#163618'); // Rich deep foliage green
+      grad.addColorStop(0.75, '#285826'); // Dark chlorophyll blade
+      grad.addColorStop(1.0, '#3e7638'); // Muted forest tip
       ctx.fillStyle = grad;
       ctx.fill();
 
@@ -910,8 +911,8 @@ export class TrackBuilder {
       ctx.beginPath();
       ctx.moveTo(startX, startY);
       ctx.quadraticCurveTo(ctrlX, ctrlY, tipX, tipY);
-      ctx.strokeStyle = '#8ee462';
-      ctx.lineWidth = 2.0;
+      ctx.strokeStyle = '#488440';
+      ctx.lineWidth = 1.8;
       ctx.stroke();
     }
 
@@ -1409,7 +1410,7 @@ export class TrackBuilder {
   }
 
   /**
-   * Crisp FIA Official Road Lines, High-Speed Optical Flow Markings & Racing Rubber Line
+   * Crisp FIA Official Road Lines & High-Speed Optical Flow Markings
    */
   private buildTrackAndPitRoadLines(trackGroup: THREE.Group): void {
     const linesGroup = new THREE.Group();
@@ -1431,17 +1432,6 @@ export class TrackBuilder {
       polygonOffsetFactor: -2.0,
       polygonOffsetUnits: -4.0,
     });
-    const rubberMat = new THREE.MeshStandardMaterial({
-      color: 0x080a0d,
-      roughness: 0.30,
-      metalness: 0.16,
-      transparent: true,
-      opacity: 0.65,
-      depthWrite: false,
-      polygonOffset: true,
-      polygonOffsetFactor: -1.0,
-      polygonOffsetUnits: -2.0,
-    });
 
     const half = this.halfSize;
     const w = this.trackWidth;
@@ -1449,7 +1439,6 @@ export class TrackBuilder {
     const straightLen = c * 2; // 184m
 
     const whiteGeos: THREE.BufferGeometry[] = [];
-    const rubberGeos: THREE.BufferGeometry[] = [];
 
     // --- A. CONTINUOUS FIA TRACK LIMIT BOUNDARY LINES (Inner & Outer edges on all 4 straights) ---
     const hLineGeo = new THREE.PlaneGeometry(straightLen, 0.25);
@@ -1574,43 +1563,9 @@ export class TrackBuilder {
         24,
         0.009
       ));
-
-      // Continuous Racing Rubber Line through this corner
-      rubberGeos.push(this.createCornerRoadGeometry(
-        cfg.cx,
-        cfg.cz,
-        this.cornerRadius - 2.5,
-        this.cornerRadius + 2.5,
-        cfg.startA,
-        cfg.startA + Math.PI / 2,
-        24,
-        0.007
-      ));
     });
 
-    // --- C. DARK GLOSSY RACING RUBBER LINE (Trazada de caucho pulido de F1) ---
-    const rubberHGeo = new THREE.PlaneGeometry(straightLen, 5.0);
-    rubberHGeo.rotateX(-Math.PI / 2);
-    const rubberVGeo = new THREE.PlaneGeometry(5.0, straightLen);
-    rubberVGeo.rotateX(-Math.PI / 2);
-
-    const northRubberGeo = rubberHGeo.clone();
-    northRubberGeo.translate(0, 0.007, half - 1.2);
-    rubberGeos.push(northRubberGeo);
-
-    const eastRubberGeo = rubberVGeo.clone();
-    eastRubberGeo.translate(half - 1.2, 0.007, 0);
-    rubberGeos.push(eastRubberGeo);
-
-    const westRubberGeo = rubberVGeo.clone();
-    westRubberGeo.translate(-half + 1.2, 0.007, 0);
-    rubberGeos.push(westRubberGeo);
-
-    const southRubberGeo = rubberHGeo.clone();
-    southRubberGeo.translate(0, 0.007, -half + 1.2);
-    rubberGeos.push(southRubberGeo);
-
-    // --- D. PIT LANE & PIT ENTRY MARKINGS ---
+    // --- C. PIT LANE & PIT ENTRY MARKINGS ---
     // 1. South Straight Inner Track Limit Solid White Line (z = -122)
     const lineWestGeo = new THREE.PlaneGeometry(24, 0.3);
     lineWestGeo.rotateX(-Math.PI / 2);
@@ -1676,11 +1631,6 @@ export class TrackBuilder {
         whiteMesh.receiveShadow = true;
         linesGroup.add(whiteMesh);
       }
-    }
-
-    if (rubberGeos.length > 0) {
-      const mergedRubber = this.mergeAndDispose(rubberGeos, false);
-      if (mergedRubber) linesGroup.add(new THREE.Mesh(mergedRubber, rubberMat));
     }
 
     trackGroup.add(linesGroup);

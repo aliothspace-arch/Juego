@@ -225,11 +225,12 @@ export class SpeedwayTrackBuilder implements ITrackWorld {
     this.grassMat = new THREE.MeshStandardMaterial({
       map: grassTextures.albedo,
       normalMap: grassTextures.normal,
-      normalScale: new THREE.Vector2(0.65, 0.65),
+      normalScale: new THREE.Vector2(1.8, 1.8),
       roughnessMap: grassTextures.roughness,
-      roughness: 0.90,
+      roughness: 0.85,
       metalness: 0.0,
-      envMapIntensity: 0.01,
+      envMapIntensity: 0.12,
+      color: new THREE.Color(0x82987a),
     });
 
     this.gravelMat = new THREE.MeshStandardMaterial({

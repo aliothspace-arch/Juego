@@ -448,6 +448,10 @@ export class RacingGameEngine {
     this.scene.add(this.dirLight.target);
     this.dirLight.target.updateMatrixWorld();
     this.dirLight.updateMatrixWorld();
+
+    // Sync sun vector with volumetric particle lighting
+    const sunVec = new THREE.Vector3(-36, 24, 42).normalize();
+    this.particles.setSunDirection(sunVec);
   }
 
   /**
@@ -541,15 +545,18 @@ export class RacingGameEngine {
     rawDt = Math.min(Math.max(rawDt, 0.001), 0.050);
 
     // VSync Frame Pacing Snap:
-    // Browser timer quantization jitter (e.g. 16.3ms vs 17.0ms) crossing the 16.6667ms threshold
-    // causes 0-substep and 2-substep alternating thrashing (the root cause of micro-stutters).
-    // Snapping delta-time when close to VSync cadence locks the engine to exactly 1 deterministic step per frame!
+    // Browser timer quantization jitter crossing thresholds causes 0-substep and 2-substep thrashing.
+    // Snapping delta-time when close to standard monitor refresh rates locks the engine to deterministic cadence!
     if (Math.abs(rawDt - 0.0166667) < 0.0028) {
-      rawDt = 0.0166667;
+      rawDt = 0.0166667; // 60 Hz
+    } else if (Math.abs(rawDt - 0.0133333) < 0.0020) {
+      rawDt = 0.0133333; // 75 Hz
+    } else if (Math.abs(rawDt - 0.0111111) < 0.0018) {
+      rawDt = 0.0111111; // 90 Hz
     } else if (Math.abs(rawDt - 0.0083333) < 0.0015) {
-      rawDt = 0.0083333;
+      rawDt = 0.0083333; // 120 Hz
     } else if (Math.abs(rawDt - 0.0069444) < 0.0012) {
-      rawDt = 0.0069444;
+      rawDt = 0.0069444; // 144 Hz
     }
 
     const dt = this.isPaused ? 0 : rawDt;
@@ -1600,18 +1607,23 @@ export class RacingGameEngine {
     this.particles.addFourWheelSkidmarks(this._fourWheelsArray, slips, carForward);
 
     // Dynamic Tangential Tire Smoke when drifting, burnout, or rear wheelspin traction loss
-    const isDriftingAtSpeed = this.physics.isDrifting && speedKmh > 12;
-    const isBurnout = (this.inputs.throttle > 0.9 && speedKmh < 8 && this.physics.gear === 1) || this.physics.tireWheelspinActive;
+    const isDriftingAtSpeed = this.physics.isDrifting && speedKmh > 10;
+    const isBurnout = (this.inputs.throttle > 0.82 && speedKmh < 12 && this.physics.gear === 1) || this.physics.tireWheelspinActive;
 
-    if (slips[2] > 0.30 || isDriftingAtSpeed || isBurnout) {
-      this.particles.emitTireSmoke(wRL, 2, Math.max(slips[2], isDriftingAtSpeed ? 0.7 : 0.5), carVel);
-    }
-    if (slips[3] > 0.30 || isDriftingAtSpeed || isBurnout) {
-      this.particles.emitTireSmoke(wRR, 2, Math.max(slips[3], isDriftingAtSpeed ? 0.7 : 0.5), carVel);
-    }
-    if (this.physics.isDrifting && speedKmh > 20) {
-      if (slips[0] > 0.35) this.particles.emitTireSmoke(wFL, 1, slips[0] * 0.7, carVel);
-      if (slips[1] > 0.35) this.particles.emitTireSmoke(wFR, 1, slips[1] * 0.7, carVel);
+    const slipRL = Math.max(slips[2], isDriftingAtSpeed ? 0.75 : isBurnout ? 0.95 : 0);
+    const slipRR = Math.max(slips[3], isDriftingAtSpeed ? 0.75 : isBurnout ? 0.95 : 0);
+
+    this.particles.emitContinuousTireSmoke(2, wRL, slipRL, carVel, speedKmh, isBurnout);
+    this.particles.emitContinuousTireSmoke(3, wRR, slipRR, carVel, speedKmh, isBurnout);
+
+    if (this.physics.isDrifting && speedKmh > 18) {
+      if (slips[0] > 0.22) this.particles.emitContinuousTireSmoke(0, wFL, slips[0] * 0.85, carVel, speedKmh, false);
+      else this.particles.breakTireSmokeTrail(0);
+      if (slips[1] > 0.22) this.particles.emitContinuousTireSmoke(1, wFR, slips[1] * 0.85, carVel, speedKmh, false);
+      else this.particles.breakTireSmokeTrail(1);
+    } else {
+      this.particles.breakTireSmokeTrail(0);
+      this.particles.breakTireSmokeTrail(1);
     }
 
     // Punctured bare rim grinding sparks on asphalt

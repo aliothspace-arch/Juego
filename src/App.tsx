@@ -138,7 +138,20 @@ export default function App() {
     }) => Promise<void>
   >(null!);
 
-  // Initialize Multiplayer Client (Engine is lazily mounted during the loading screen)
+  // Multiplayer Client (mounted once, persistent lifecycle)
+  const selectedCircuitRef = useRef<CircuitId>(selectedCircuit);
+  selectedCircuitRef.current = selectedCircuit;
+
+  const handleRequestPitStop = useCallback(() => {
+    engineRef.current?.requestPitStop();
+  }, []);
+
+  const handleSelectNextPitTireCompound = useCallback((comp: TireCompoundType) => {
+    engineRef.current?.setNextPitTireCompound(comp);
+    setTelemetry((prev) => ({ ...prev, nextPitTireCompound: comp }));
+  }, []);
+
+  // Initialize Multiplayer Client once on mount
   useEffect(() => {
     const client = new MultiplayerClient();
     multiplayerRef.current = client;
@@ -180,7 +193,7 @@ export default function App() {
     client.onRaceStarting = (room) => {
       setRoomState(room);
       setRaceWinner(null);
-      const cId = (room.circuitId as CircuitId) || selectedCircuit;
+      const cId = (room.circuitId as CircuitId) || selectedCircuitRef.current;
       startRaceWithLoadingScreenRef.current?.({
         circuitId: cId,
         mode: 'multiplayer',
@@ -221,7 +234,7 @@ export default function App() {
       }
       multiplayerRef.current = null;
     };
-  }, [selectedCircuit]);
+  }, []);
 
   // Real-time Ultra-Low Latency Telemetry Broadcast Loop (50 Hz / 20ms)
   useEffect(() => {
@@ -377,7 +390,12 @@ export default function App() {
           engineRef.current = eng;
 
           eng.onTelemetryUpdate = (data) => {
-            setDrsStatus({ isOpen: data.isDrsOpen, isAvailable: data.isDrsAvailable });
+            setDrsStatus((prev) => {
+              if (prev.isOpen === data.isDrsOpen && prev.isAvailable === data.isDrsAvailable) {
+                return prev;
+              }
+              return { isOpen: data.isDrsOpen, isAvailable: data.isDrsAvailable };
+            });
           };
         } else if (eng && eng.activeCircuit.id !== config.circuitId) {
           eng.setCircuit(config.circuitId);
@@ -804,15 +822,9 @@ export default function App() {
           onOpenPause={handleOpenPause}
           onReturnToModes={handleExitToMenu}
           onToggleDRS={handleToggleDRS}
-          onRequestPitStop={() => engineRef.current?.requestPitStop()}
-          onSelectNextPitTireCompound={(comp) => {
-            engineRef.current?.setNextPitTireCompound(comp);
-            setTelemetry((prev) => ({ ...prev, nextPitTireCompound: comp }));
-          }}
-          onChangeTireCompound={(comp) => {
-            engineRef.current?.setNextPitTireCompound(comp);
-            setTelemetry((prev) => ({ ...prev, nextPitTireCompound: comp }));
-          }}
+          onRequestPitStop={handleRequestPitStop}
+          onSelectNextPitTireCompound={handleSelectNextPitTireCompound}
+          onChangeTireCompound={handleSelectNextPitTireCompound}
           isFullscreen={isFullscreen}
           onToggleFullscreen={handleToggleFullscreen}
           isMultiplayer={isMultiplayer}

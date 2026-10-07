@@ -32,6 +32,9 @@ interface SmokePuff {
   colorR: number;
   colorG: number;
   colorB: number;
+  growthExponent: number;
+  buoyancy: number;
+  drag: number;
 }
 
 interface DebrisChunk {
@@ -68,13 +71,26 @@ export class ParticleSystem {
   private sparkSpawnAccumulator = 0;
   private vortexTime = 0;
 
-  // --- 2. Volumetric Smoke Particles ---
+  // --- 2. Ultra-Realistic Volumetric Smoke System (Instanced Quads with FBM Noise Erosion & Light Extinction) ---
   private smokePuffs: SmokePuff[] = [];
-  private smokePoints!: THREE.Points;
-  private smokePositions!: Float32Array;
-  private smokeColors!: Float32Array;
-  private smokeSizes!: Float32Array;
-  private maxSmoke = 240;
+  private smokePool: SmokePuff[] = [];
+  private smokeMesh!: THREE.Mesh;
+  private smokeInstGeo!: THREE.InstancedBufferGeometry;
+  private smokeMaterial!: THREE.ShaderMaterial;
+  private smokeInstPos!: Float32Array;      // vec3 (x, y, z)
+  private smokeInstParams!: Float32Array;   // vec4 (size, rotation, opacity, progress)
+  private smokeInstColor!: Float32Array;    // vec4 (r, g, b, coreAbsorption)
+  private smokeInstVel!: Float32Array;      // vec3 (vx, vy, vz)
+  private maxSmoke = 560;
+  private sunDirection = new THREE.Vector3(-0.6, 0.7, 0.4).normalize();
+  private smokeTime = 0;
+  private lastTireSmokePositions: THREE.Vector3[] = [
+    new THREE.Vector3(),
+    new THREE.Vector3(),
+    new THREE.Vector3(),
+    new THREE.Vector3(),
+  ];
+  private lastTireSmokeActive: boolean[] = [false, false, false, false];
 
   // --- 3. 3D Carbon Fiber Fracture Shards (Single Batched InstancedMesh) ---
   private debrisList: DebrisChunk[] = [];
@@ -132,7 +148,6 @@ export class ParticleSystem {
   private prevActiveScorches = 0;
 
   // Pools to eliminate GC allocation completely
-  private smokePool: SmokePuff[] = [];
   private scorchPool: ScorchMark[] = [];
 
   /**
@@ -179,22 +194,25 @@ export class ParticleSystem {
       });
     }
 
-    // 2. Pre-allocate smoke puff object pool
+    // 2. Pre-allocate volumetric smoke puff object pool
     for (let i = 0; i < this.maxSmoke; i++) {
       this.smokePool.push({
         position: new THREE.Vector3(0, -99999, 0),
         velocity: new THREE.Vector3(),
         size: 0.5,
-        maxSize: 1.5,
+        maxSize: 3.2,
         rotation: 0,
         rotationSpeed: 0,
         opacity: 0.8,
         maxOpacity: 0.8,
         life: 0,
         maxLife: 1.0,
-        colorR: 0.9,
-        colorG: 0.9,
-        colorB: 0.9,
+        colorR: 0.95,
+        colorG: 0.95,
+        colorB: 0.97,
+        growthExponent: 0.45,
+        buoyancy: 0.35,
+        drag: 1.3,
       });
     }
 
@@ -234,32 +252,61 @@ export class ParticleSystem {
   }
 
   /**
+   * Set directional sun vector for dynamic volumetric smoke lighting and forward scattering
+   */
+  public setSunDirection(dir: THREE.Vector3): void {
+    this.sunDirection.copy(dir).normalize();
+    if (this.smokeMaterial && this.smokeMaterial.uniforms.uSunDir) {
+      this.smokeMaterial.uniforms.uSunDir.value.copy(this.sunDirection);
+    }
+  }
+
+  /**
    * Generates procedural radial alpha masks and scorch textures
    */
   private createTextures(): void {
-    // 1. Soft Gaussian Smoke Texture
+    // 1. High-Fidelity Multi-Octave Volumetric Cumulus Smoke Texture (256x256)
     const smokeCanvas = document.createElement('canvas');
-    smokeCanvas.width = 128;
-    smokeCanvas.height = 128;
+    smokeCanvas.width = 256;
+    smokeCanvas.height = 256;
     const sCtx = smokeCanvas.getContext('2d')!;
 
-    const sGrad = sCtx.createRadialGradient(64, 64, 4, 64, 64, 62);
-    sGrad.addColorStop(0, 'rgba(255, 255, 255, 1.0)');
-    sGrad.addColorStop(0.25, 'rgba(240, 240, 245, 0.85)');
-    sGrad.addColorStop(0.55, 'rgba(200, 205, 215, 0.45)');
-    sGrad.addColorStop(0.85, 'rgba(160, 165, 175, 0.12)');
-    sGrad.addColorStop(1.0, 'rgba(120, 120, 130, 0.0)');
-    sCtx.fillStyle = sGrad;
-    sCtx.fillRect(0, 0, 128, 128);
+    sCtx.clearRect(0, 0, 256, 256);
 
-    sCtx.fillStyle = 'rgba(255, 255, 255, 0.15)';
-    for (let i = 0; i < 20; i++) {
-      const x = 30 + Math.random() * 68;
-      const y = 30 + Math.random() * 68;
-      const r = 10 + Math.random() * 18;
-      sCtx.beginPath();
-      sCtx.arc(x, y, r, 0, Math.PI * 2);
-      sCtx.fill();
+    // Multi-scale overlapping cellular billow lobes
+    const baseGrad = sCtx.createRadialGradient(128, 128, 8, 128, 128, 122);
+    baseGrad.addColorStop(0.0, 'rgba(255, 255, 255, 0.95)');
+    baseGrad.addColorStop(0.35, 'rgba(245, 245, 248, 0.78)');
+    baseGrad.addColorStop(0.65, 'rgba(220, 225, 235, 0.38)');
+    baseGrad.addColorStop(0.88, 'rgba(180, 185, 195, 0.09)');
+    baseGrad.addColorStop(1.0, 'rgba(140, 145, 155, 0.0)');
+    sCtx.fillStyle = baseGrad;
+    sCtx.fillRect(0, 0, 256, 256);
+
+    // 48 Organic cellular micro-lobes creating billowy cauliflower/cumulus edges
+    const seedPoints = [
+      { r: 0.25, lobes: 10, radiusMin: 24, radiusMax: 42, alpha: 0.22 },
+      { r: 0.50, lobes: 18, radiusMin: 18, radiusMax: 34, alpha: 0.16 },
+      { r: 0.72, lobes: 20, radiusMin: 14, radiusMax: 26, alpha: 0.10 },
+    ];
+
+    for (const tier of seedPoints) {
+      for (let i = 0; i < tier.lobes; i++) {
+        const angle = (i / tier.lobes) * Math.PI * 2 + (Math.sin(i * 3.7) * 0.4);
+        const dist = tier.r * 110 + (Math.cos(i * 2.1) * 12);
+        const lx = 128 + Math.cos(angle) * dist;
+        const ly = 128 + Math.sin(angle) * dist;
+        const lRadius = tier.radiusMin + ((i * 17) % 11) * 1.5;
+
+        const lobeGrad = sCtx.createRadialGradient(lx, ly, 2, lx, ly, lRadius);
+        lobeGrad.addColorStop(0.0, `rgba(255, 255, 255, ${tier.alpha})`);
+        lobeGrad.addColorStop(0.5, `rgba(240, 242, 248, ${tier.alpha * 0.55})`);
+        lobeGrad.addColorStop(1.0, 'rgba(200, 205, 215, 0.0)');
+        sCtx.fillStyle = lobeGrad;
+        sCtx.beginPath();
+        sCtx.arc(lx, ly, lRadius, 0, Math.PI * 2);
+        sCtx.fill();
+      }
     }
     this.smokeTexture = new THREE.CanvasTexture(smokeCanvas);
 
@@ -492,27 +539,201 @@ export class ParticleSystem {
   }
 
   private initVolumetricSmoke(): void {
-    const geo = new THREE.BufferGeometry();
-    this.smokePositions = new Float32Array(this.maxSmoke * 3);
-    this.smokeColors = new Float32Array(this.maxSmoke * 4); // RGBA
-    this.smokeSizes = new Float32Array(this.maxSmoke);
+    const baseGeo = new THREE.PlaneGeometry(1.0, 1.0);
+    this.smokeInstGeo = new THREE.InstancedBufferGeometry();
+    this.smokeInstGeo.index = baseGeo.index;
+    this.smokeInstGeo.attributes.position = baseGeo.attributes.position;
+    this.smokeInstGeo.attributes.uv = baseGeo.attributes.uv;
 
-    geo.setAttribute('position', new THREE.BufferAttribute(this.smokePositions, 3));
-    geo.setAttribute('color', new THREE.BufferAttribute(this.smokeColors, 4));
+    this.smokeInstPos = new Float32Array(this.maxSmoke * 3);
+    this.smokeInstParams = new Float32Array(this.maxSmoke * 4); // [size, rotation, opacity, progress]
+    this.smokeInstColor = new Float32Array(this.maxSmoke * 4);  // [r, g, b, coreAbsorption]
+    this.smokeInstVel = new Float32Array(this.maxSmoke * 3);
 
-    const mat = new THREE.PointsMaterial({
-      size: 2.2,
-      map: this.smokeTexture,
+    // Initialize all instances off-screen
+    for (let i = 0; i < this.maxSmoke; i++) {
+      this.smokeInstPos[i * 3 + 1] = -99999;
+      this.smokeInstParams[i * 4 + 2] = 0.0;
+    }
+
+    const posAttr = new THREE.InstancedBufferAttribute(this.smokeInstPos, 3);
+    posAttr.setUsage(THREE.DynamicDrawUsage);
+    this.smokeInstGeo.setAttribute('aInstancePos', posAttr);
+
+    const paramsAttr = new THREE.InstancedBufferAttribute(this.smokeInstParams, 4);
+    paramsAttr.setUsage(THREE.DynamicDrawUsage);
+    this.smokeInstGeo.setAttribute('aInstanceParams', paramsAttr);
+
+    const colorAttr = new THREE.InstancedBufferAttribute(this.smokeInstColor, 4);
+    colorAttr.setUsage(THREE.DynamicDrawUsage);
+    this.smokeInstGeo.setAttribute('aInstanceColor', colorAttr);
+
+    const velAttr = new THREE.InstancedBufferAttribute(this.smokeInstVel, 3);
+    velAttr.setUsage(THREE.DynamicDrawUsage);
+    this.smokeInstGeo.setAttribute('aInstanceVel', velAttr);
+
+    this.smokeMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uTexture: { value: this.smokeTexture },
+        uSunDir: { value: this.sunDirection },
+        uTime: { value: 0.0 },
+      },
+      vertexShader: `
+        attribute vec3 aInstancePos;
+        attribute vec4 aInstanceParams; // x: size, y: rotation, z: opacity, w: progress
+        attribute vec4 aInstanceColor;  // rgb: color, a: coreDensity
+        attribute vec3 aInstanceVel;
+
+        varying vec2 vUv;
+        varying vec4 vColor;
+        varying vec3 vWorldPos;
+        varying float vProgress;
+
+        void main() {
+          vUv = uv;
+          float size = aInstanceParams.x;
+          float rot = aInstanceParams.y;
+          float opacity = aInstanceParams.z;
+          float progress = aInstanceParams.w;
+          vProgress = progress;
+
+          if (opacity <= 0.001 || size <= 0.001) {
+            gl_Position = vec4(0.0, -99999.0, 0.0, 1.0);
+            return;
+          }
+
+          // Billboard orientation vectors from camera view matrix
+          vec3 camRight = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]);
+          vec3 camUp = vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]);
+
+          // In-plane continuous rotation
+          float c = cos(rot);
+          float s = sin(rot);
+          vec2 localPos = position.xy;
+          vec2 rotatedOffset = vec2(
+            localPos.x * c - localPos.y * s,
+            localPos.x * s + localPos.y * c
+          );
+
+          // Dynamic velocity elongation along velocity vector for tire spray
+          float speed = length(aInstanceVel);
+          vec3 velDir = speed > 0.1 ? aInstanceVel / speed : vec3(0.0);
+          float stretch = clamp(speed * 0.04, 0.0, 0.40) * (1.0 - progress);
+
+          vec3 worldPos = aInstancePos
+            + (camRight * rotatedOffset.x + camUp * rotatedOffset.y) * size
+            - velDir * (rotatedOffset.y * stretch * size);
+
+          vWorldPos = worldPos;
+          vColor = vec4(aInstanceColor.rgb, opacity);
+
+          gl_Position = projectionMatrix * viewMatrix * vec4(worldPos, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D uTexture;
+        uniform vec3 uSunDir;
+        uniform float uTime;
+
+        varying vec2 vUv;
+        varying vec4 vColor;
+        varying vec3 vWorldPos;
+        varying float vProgress;
+
+        // Fast analytical 2D Simplex/FBM Noise
+        vec2 hash2(vec2 p) {
+          p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+          return -1.0 + 2.0 * fract(sin(p) * 43758.5453123);
+        }
+
+        float noise2D(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          vec2 u = f * f * (3.0 - 2.0 * f);
+          return mix(
+            mix(dot(hash2(i + vec2(0.0, 0.0)), f - vec2(0.0, 0.0)),
+                dot(hash2(i + vec2(1.0, 0.0)), f - vec2(1.0, 0.0)), u.x),
+            mix(dot(hash2(i + vec2(0.0, 1.0)), f - vec2(0.0, 1.0)),
+                dot(hash2(i + vec2(1.0, 1.0)), f - vec2(1.0, 1.0)), u.x),
+            u.y
+          );
+        }
+
+        float fbm2D(vec2 p) {
+          float v = 0.0;
+          v += 0.5000 * noise2D(p); p *= 2.02;
+          v += 0.2500 * noise2D(p); p *= 2.03;
+          v += 0.1250 * noise2D(p);
+          return v;
+        }
+
+        void main() {
+          // 1. Dynamic Organic UV Swirling Turbulence
+          vec2 swirlOffset = hash2(vUv * 3.5 + uTime * 0.35 + vProgress * 2.5) * (0.045 * vProgress);
+          vec2 distUv = clamp(vUv + swirlOffset, 0.0, 1.0);
+          vec4 tex = texture2D(uTexture, distUv);
+          if (tex.a < 0.005) discard;
+
+          // 2. Multi-Octave FBM Noise Erosion (Organic filament dissolution)
+          float nVal = fbm2D(distUv * 4.2 + vec2(vProgress * 0.9, uTime * 0.15));
+          float noiseNorm = nVal * 0.5 + 0.5;
+          float erosionThreshold = vProgress * 0.55;
+          float alphaErosion = smoothstep(erosionThreshold, erosionThreshold + 0.35, noiseNorm);
+
+          // 3. Analytical Hemispherical Normal (Sphere Impostor for true 3D curvature)
+          vec2 nUv = (vUv - 0.5) * 2.0;
+          float rSq = dot(nUv, nUv);
+          float nz = sqrt(max(0.0, 1.0 - rSq * 0.82));
+          vec2 normalPerturb = (hash2(distUv * 6.0 + uTime * 0.2) * 0.22) * (1.0 - vProgress * 0.5);
+          vec3 norm = normalize(vec3(nUv * 0.72 + normalPerturb, nz));
+
+          // Camera-facing space to World space
+          vec3 toCam = normalize(cameraPosition - vWorldPos);
+          vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), toCam));
+          vec3 up = cross(toCam, right);
+          vec3 worldNormal = normalize(right * norm.x + up * norm.y + toCam * norm.z);
+
+          // 4. Direct Sunlight with Half-Lambert diffuse scattering
+          vec3 sunDir = normalize(uSunDir);
+          float NdotL = dot(worldNormal, sunDir);
+          float directLight = clamp(NdotL * 0.58 + 0.42, 0.20, 1.25);
+
+          // 5. Forward Scattering (Mie phase backlighting glow: radiant white/silver when looking into sun)
+          float VdotL = clamp(dot(toCam, -sunDir), 0.0, 1.0);
+          float forwardScatter = pow(VdotL, 3.5) * 0.52;
+
+          // 6. Ambient Hemispheric Skylight & Dark Asphalt Ground Absorption
+          float skyGround = clamp(worldNormal.y * 0.5 + 0.5, 0.0, 1.0);
+          vec3 skyLight = vec3(0.78, 0.82, 0.92);
+          vec3 asphaltAbsorption = vec3(0.20, 0.21, 0.24);
+          vec3 ambientEnv = mix(asphaltAbsorption, skyLight, skyGround);
+
+          // 7. Volumetric Cavity Occlusion & Optical Depth (Beer-Lambert attenuation)
+          float coreDensity = pow(nz, 1.35);
+          float cavityOcclusion = clamp(0.65 + 0.35 * noiseNorm, 0.4, 1.0);
+          vec3 sunShading = vec3(1.15, 1.10, 1.04) * (directLight * cavityOcclusion);
+
+          vec3 litColor = vColor.rgb * (ambientEnv * 0.50 + sunShading) + vec3(1.0, 0.98, 0.94) * forwardScatter;
+
+          // 8. Ground Soft Contact Fade (Eliminates ugly planar floor cuts at y = 0)
+          float groundFade = clamp((vWorldPos.y - 0.010) / 0.16, 0.0, 1.0);
+
+          // 9. Combined Final Alpha
+          float finalAlpha = tex.a * vColor.a * (0.40 + 0.60 * coreDensity) * alphaErosion * groundFade;
+          if (finalAlpha < 0.005) discard;
+
+          gl_FragColor = vec4(litColor, finalAlpha);
+        }
+      `,
       transparent: true,
-      vertexColors: true,
       depthWrite: false,
       blending: THREE.NormalBlending,
-      opacity: 0.75,
+      side: THREE.DoubleSide,
     });
 
-    this.smokePoints = new THREE.Points(geo, mat);
-    this.smokePoints.frustumCulled = false;
-    this.group.add(this.smokePoints);
+    this.smokeMesh = new THREE.Mesh(this.smokeInstGeo, this.smokeMaterial);
+    this.smokeMesh.frustumCulled = false;
+    this.group.add(this.smokeMesh);
   }
 
   private initDebris(): void {
@@ -776,44 +997,50 @@ export class ParticleSystem {
         puff = {
           position: new THREE.Vector3(),
           velocity: new THREE.Vector3(),
-          size: 0.25,
-          maxSize: 0.9,
+          size: 0.22,
+          maxSize: 1.1,
           rotation: 0,
           rotationSpeed: 0,
-          opacity: 0.8,
-          maxOpacity: 0.8,
+          opacity: 0.85,
+          maxOpacity: 0.85,
           life: 0,
           maxLife: 0.35,
           colorR: 0.98,
           colorG: 0.99,
           colorB: 1.0,
+          growthExponent: 0.35,
+          buoyancy: 0.2,
+          drag: 3.5,
         };
       } else {
         puff = this.popOldest(this.smokePuffs)!;
       }
 
-      const speed = 2.5 + Math.random() * 3.5;
+      const speed = 3.2 + Math.random() * 4.2;
       puff.position.set(
-        pos.x + (Math.random() - 0.5) * 0.1,
-        pos.y + (Math.random() - 0.5) * 0.1,
-        pos.z + (Math.random() - 0.5) * 0.1
+        pos.x + (Math.random() - 0.5) * 0.08,
+        pos.y + (Math.random() - 0.5) * 0.08,
+        pos.z + (Math.random() - 0.5) * 0.08
       );
       puff.velocity.set(
         dir.x * speed + (Math.random() - 0.5) * 0.8,
         dir.y * speed + (Math.random() - 0.5) * 0.8,
         dir.z * speed + (Math.random() - 0.5) * 0.8
       );
-      puff.size = 0.25;
-      puff.maxSize = 0.9 + Math.random() * 0.4;
+      puff.size = 0.22;
+      puff.maxSize = 1.1 + Math.random() * 0.4;
       puff.rotation = Math.random() * Math.PI * 2;
-      puff.rotationSpeed = (Math.random() - 0.5) * 3.0;
-      puff.opacity = 0.8;
-      puff.maxOpacity = 0.8;
+      puff.rotationSpeed = (Math.random() - 0.5) * 3.5;
+      puff.opacity = 0.85;
+      puff.maxOpacity = 0.85;
       puff.life = 0;
-      puff.maxLife = 0.35 + Math.random() * 0.2;
+      puff.maxLife = 0.35 + Math.random() * 0.18;
       puff.colorR = 0.98;
       puff.colorG = 0.99;
       puff.colorB = 1.0;
+      puff.growthExponent = 0.35;
+      puff.buoyancy = 0.2;
+      puff.drag = 3.5;
 
       this.smokePuffs.push(puff);
     }
@@ -831,45 +1058,51 @@ export class ParticleSystem {
         puff = {
           position: new THREE.Vector3(),
           velocity: new THREE.Vector3(),
-          size: 0.12,
-          maxSize: 0.55,
+          size: 0.14,
+          maxSize: 0.75,
           rotation: 0,
           rotationSpeed: 0,
-          opacity: 0.92,
-          maxOpacity: 0.92,
+          opacity: 0.94,
+          maxOpacity: 0.94,
           life: 0,
-          maxLife: 0.22,
-          colorR: 0.94,
-          colorG: 0.97,
+          maxLife: 0.25,
+          colorR: 0.92,
+          colorG: 0.96,
           colorB: 1.0,
+          growthExponent: 0.30,
+          buoyancy: 0.3,
+          drag: 4.0,
         };
       } else {
         puff = this.popOldest(this.smokePuffs)!;
       }
 
-      const coneSpread = 0.35;
-      const speed = 4.2 + Math.random() * 5.0;
+      const coneSpread = 0.32;
+      const speed = 4.8 + Math.random() * 5.2;
       puff.position.set(
-        pos.x + (Math.random() - 0.5) * 0.06,
-        pos.y + (Math.random() - 0.5) * 0.06,
-        pos.z + (Math.random() - 0.5) * 0.06
+        pos.x + (Math.random() - 0.5) * 0.05,
+        pos.y + (Math.random() - 0.5) * 0.05,
+        pos.z + (Math.random() - 0.5) * 0.05
       );
       puff.velocity.set(
         dir.x * speed + (Math.random() - 0.5) * coneSpread * speed,
         dir.y * speed + (Math.random() - 0.5) * coneSpread * speed + 0.3,
         dir.z * speed + (Math.random() - 0.5) * coneSpread * speed
       );
-      puff.size = 0.12;
-      puff.maxSize = 0.55 + Math.random() * 0.28;
+      puff.size = 0.14;
+      puff.maxSize = 0.75 + Math.random() * 0.35;
       puff.rotation = Math.random() * Math.PI * 2;
       puff.rotationSpeed = (Math.random() - 0.5) * 6.0;
-      puff.opacity = 0.92;
-      puff.maxOpacity = 0.92;
+      puff.opacity = 0.94;
+      puff.maxOpacity = 0.94;
       puff.life = 0;
-      puff.maxLife = 0.22 + Math.random() * 0.16;
-      puff.colorR = 0.94;
-      puff.colorG = 0.97;
+      puff.maxLife = 0.25 + Math.random() * 0.15;
+      puff.colorR = 0.92;
+      puff.colorG = 0.96;
       puff.colorB = 1.0;
+      puff.growthExponent = 0.30;
+      puff.buoyancy = 0.3;
+      puff.drag = 4.0;
 
       this.smokePuffs.push(puff);
     }
@@ -920,17 +1153,20 @@ export class ParticleSystem {
         puff = {
           position: new THREE.Vector3(),
           velocity: new THREE.Vector3(),
-          size: 0.6,
-          maxSize: 2.4,
+          size: 0.55,
+          maxSize: 3.2,
           rotation: 0,
           rotationSpeed: 0,
-          opacity: 0.65,
-          maxOpacity: 0.65,
+          opacity: 0.72,
+          maxOpacity: 0.72,
           life: 0,
-          maxLife: 0.85,
-          colorR: 0.85,
-          colorG: 0.85,
+          maxLife: 0.95,
+          colorR: 0.86,
+          colorG: 0.86,
           colorB: 0.88,
+          growthExponent: 0.42,
+          buoyancy: 0.25,
+          drag: 1.8,
         };
       } else {
         puff = this.popOldest(this.smokePuffs)!;
@@ -942,21 +1178,24 @@ export class ParticleSystem {
         pos.z + (Math.random() - 0.5) * 0.5
       );
       puff.velocity.set(
-        normal.x * 1.8 + (Math.random() - 0.5) * 1.8,
-        0.8 + Math.random() * 1.4,
-        normal.z * 1.8 + (Math.random() - 0.5) * 1.8
+        normal.x * 2.2 + (Math.random() - 0.5) * 2.0,
+        0.9 + Math.random() * 1.6,
+        normal.z * 2.2 + (Math.random() - 0.5) * 2.0
       );
-      puff.size = 0.6;
-      puff.maxSize = 2.4 + Math.random() * 1.2;
+      puff.size = 0.55;
+      puff.maxSize = 3.2 + Math.random() * 1.6;
       puff.rotation = Math.random() * Math.PI * 2;
-      puff.rotationSpeed = (Math.random() - 0.5) * 1.5;
-      puff.opacity = 0.65;
-      puff.maxOpacity = 0.65;
+      puff.rotationSpeed = (Math.random() - 0.5) * 1.8;
+      puff.opacity = 0.72;
+      puff.maxOpacity = 0.72;
       puff.life = 0;
-      puff.maxLife = 0.85 + Math.random() * 0.5;
-      puff.colorR = 0.85;
-      puff.colorG = 0.85;
+      puff.maxLife = 0.95 + Math.random() * 0.6;
+      puff.colorR = 0.86;
+      puff.colorG = 0.86;
       puff.colorB = 0.88;
+      puff.growthExponent = 0.42;
+      puff.buoyancy = 0.25;
+      puff.drag = 1.8;
 
       this.smokePuffs.push(puff);
     }
@@ -972,7 +1211,7 @@ export class ParticleSystem {
     slipRatio: number = 0.5,
     tireVelocity?: THREE.Vector3
   ): void {
-    const opacityFactor = Math.min(0.92, 0.45 + slipRatio * 0.5);
+    const opacityFactor = Math.min(0.96, 0.55 + slipRatio * 0.42);
 
     for (let i = 0; i < count; i++) {
       let puff: SmokePuff;
@@ -983,44 +1222,128 @@ export class ParticleSystem {
           position: new THREE.Vector3(),
           velocity: new THREE.Vector3(),
           size: 0.45,
-          maxSize: 2.8,
+          maxSize: 3.4,
           rotation: 0,
           rotationSpeed: 0,
           opacity: opacityFactor,
           maxOpacity: opacityFactor,
           life: 0,
-          maxLife: 1.1,
-          colorR: 0.94,
-          colorG: 0.94,
-          colorB: 0.96,
+          maxLife: 1.2,
+          colorR: 0.95,
+          colorG: 0.95,
+          colorB: 0.97,
+          growthExponent: 0.45,
+          buoyancy: 0.35,
+          drag: 1.4,
         };
       } else {
         puff = this.popOldest(this.smokePuffs)!;
       }
 
-      const vx = tireVelocity ? tireVelocity.x * (0.4 + Math.random() * 0.3) + (Math.random() - 0.5) * 1.2 : (Math.random() - 0.5) * 1.2;
-      const vz = tireVelocity ? tireVelocity.z * (0.4 + Math.random() * 0.3) + (Math.random() - 0.5) * 1.2 : (Math.random() - 0.5) * 1.2;
-      const vy = 0.55 + Math.random() * 1.1 + (slipRatio * 0.6);
+      // Tire tangential velocity + turbulent scatter
+      const vx = tireVelocity
+        ? tireVelocity.x * (0.35 + Math.random() * 0.35) + (Math.random() - 0.5) * 1.4
+        : (Math.random() - 0.5) * 1.4;
+      const vz = tireVelocity
+        ? tireVelocity.z * (0.35 + Math.random() * 0.35) + (Math.random() - 0.5) * 1.4
+        : (Math.random() - 0.5) * 1.4;
+      const vy = 0.35 + Math.random() * 0.85 + slipRatio * 0.6;
+
+      const isBasePlume = i === 0 && Math.random() < 0.65;
 
       puff.position.set(
-        pos.x + (Math.random() - 0.5) * 0.4,
-        0.06 + Math.random() * 0.08,
-        pos.z + (Math.random() - 0.5) * 0.4
+        pos.x + (Math.random() - 0.5) * 0.32,
+        0.04 + Math.random() * 0.06,
+        pos.z + (Math.random() - 0.5) * 0.32
       );
       puff.velocity.set(vx, vy, vz);
-      puff.size = 0.45 + Math.random() * 0.35;
-      puff.maxSize = 2.8 + Math.random() * 1.6 + slipRatio * 1.4;
+
+      if (isBasePlume) {
+        // Concentrated hot high-density vapor at contact patch
+        puff.size = 0.28 + Math.random() * 0.22;
+        puff.maxSize = 2.4 + Math.random() * 1.2 + slipRatio * 1.2;
+        puff.growthExponent = 0.38; // rapid early thermal expansion
+        puff.maxLife = 0.85 + Math.random() * 0.55;
+        puff.maxOpacity = Math.min(0.98, opacityFactor * 1.15);
+        puff.buoyancy = 0.55 + Math.random() * 0.4;
+        puff.drag = 2.0;
+        puff.colorR = 0.96;
+        puff.colorG = 0.96;
+        puff.colorB = 0.98;
+      } else {
+        // Dispersed volumetric swirling cloud
+        puff.size = 0.55 + Math.random() * 0.45;
+        puff.maxSize = 3.6 + Math.random() * 2.2 + slipRatio * 1.8;
+        puff.growthExponent = 0.52;
+        puff.maxLife = 1.2 + Math.random() * 0.8;
+        puff.maxOpacity = opacityFactor * 0.88;
+        puff.buoyancy = 0.28 + Math.random() * 0.32;
+        puff.drag = 1.1;
+        puff.colorR = 0.93;
+        puff.colorG = 0.93;
+        puff.colorB = 0.95;
+      }
+
       puff.rotation = Math.random() * Math.PI * 2;
-      puff.rotationSpeed = (Math.random() - 0.5) * 2.8;
-      puff.opacity = opacityFactor;
-      puff.maxOpacity = opacityFactor;
+      puff.rotationSpeed = (Math.random() - 0.5) * 2.6;
+      puff.opacity = 0;
       puff.life = 0;
-      puff.maxLife = 1.1 + Math.random() * 0.7;
-      puff.colorR = 0.94;
-      puff.colorG = 0.94;
-      puff.colorB = 0.96;
 
       this.smokePuffs.push(puff);
+    }
+  }
+
+  /**
+   * Emit seamless sub-frame interpolated continuous tire smoke trail without discrete gaps
+   */
+  public emitContinuousTireSmoke(
+    wheelIdx: number,
+    currentPos: THREE.Vector3,
+    slipRatio: number,
+    tireVelocity?: THREE.Vector3,
+    _carSpeedKmh: number = 0,
+    isBurnout: boolean = false
+  ): void {
+    if (slipRatio < 0.16 && !isBurnout) {
+      this.lastTireSmokeActive[wheelIdx] = false;
+      return;
+    }
+
+    if (!this.lastTireSmokeActive[wheelIdx]) {
+      this.lastTireSmokePositions[wheelIdx].copy(currentPos);
+      this.lastTireSmokeActive[wheelIdx] = true;
+      this.emitTireSmoke(currentPos, isBurnout ? 3 : 2, slipRatio, tireVelocity);
+      return;
+    }
+
+    const lastPos = this.lastTireSmokePositions[wheelIdx];
+    const dist = currentPos.distanceTo(lastPos);
+
+    if (dist < 0.08) {
+      if (isBurnout || slipRatio > 0.35) {
+        this.emitTireSmoke(currentPos, isBurnout ? 3 : 2, slipRatio, tireVelocity);
+      }
+      return;
+    }
+
+    // Sub-frame interpolation steps (every ~0.20 meters of tire displacement)
+    const stepDist = 0.20;
+    const steps = Math.min(5, Math.max(1, Math.floor(dist / stepDist)));
+
+    for (let s = 1; s <= steps; s++) {
+      const t = s / steps;
+      this._scratchVec1.lerpVectors(lastPos, currentPos, t);
+      this.emitTireSmoke(this._scratchVec1, isBurnout ? 2 : 1, slipRatio, tireVelocity);
+    }
+
+    this.lastTireSmokePositions[wheelIdx].copy(currentPos);
+  }
+
+  public breakTireSmokeTrail(wheelIdx?: number): void {
+    if (wheelIdx !== undefined) {
+      this.lastTireSmokeActive[wheelIdx] = false;
+    } else {
+      for (let w = 0; w < 4; w++) this.lastTireSmokeActive[w] = false;
     }
   }
 
@@ -1041,16 +1364,19 @@ export class ParticleSystem {
           position: new THREE.Vector3(),
           velocity: new THREE.Vector3(),
           size: 0.12,
-          maxSize: 0.42,
+          maxSize: 0.55,
           rotation: 0,
           rotationSpeed: 0,
-          opacity: 0.32,
-          maxOpacity: 0.32,
+          opacity: 0.35,
+          maxOpacity: 0.35,
           life: 0,
           maxLife: 0.55,
           colorR: 0.88,
           colorG: 0.92,
           colorB: 0.96,
+          growthExponent: 0.45,
+          buoyancy: 0.4,
+          drag: 1.5,
         };
       } else {
         puff = this.popOldest(this.smokePuffs)!;
@@ -1067,16 +1393,19 @@ export class ParticleSystem {
         rearDir.z * 0.35 + (Math.random() - 0.5) * 0.15
       );
       puff.size = 0.12;
-      puff.maxSize = 0.42 + Math.random() * 0.15;
+      puff.maxSize = 0.55 + Math.random() * 0.2;
       puff.rotation = Math.random() * Math.PI * 2;
-      puff.rotationSpeed = (Math.random() - 0.5) * 1.2;
-      puff.opacity = 0.32;
-      puff.maxOpacity = 0.32;
+      puff.rotationSpeed = (Math.random() - 0.5) * 1.4;
+      puff.opacity = 0.35;
+      puff.maxOpacity = 0.35;
       puff.life = 0;
       puff.maxLife = 0.55 + Math.random() * 0.25;
       puff.colorR = 0.88;
       puff.colorG = 0.92;
       puff.colorB = 0.96;
+      puff.growthExponent = 0.45;
+      puff.buoyancy = 0.4;
+      puff.drag = 1.5;
 
       this.smokePuffs.push(puff);
     } else if (mode === 'power') {
@@ -1087,23 +1416,26 @@ export class ParticleSystem {
         puff = {
           position: new THREE.Vector3(),
           velocity: new THREE.Vector3(),
-          size: 0.15,
-          maxSize: 0.62,
+          size: 0.16,
+          maxSize: 0.85,
           rotation: 0,
           rotationSpeed: 0,
-          opacity: 0.38,
-          maxOpacity: 0.38,
+          opacity: 0.42,
+          maxOpacity: 0.42,
           life: 0,
-          maxLife: 0.28,
+          maxLife: 0.35,
           colorR: 0.72,
           colorG: 0.75,
           colorB: 0.80,
+          growthExponent: 0.38,
+          buoyancy: 0.5,
+          drag: 2.2,
         };
       } else {
         puff = this.popOldest(this.smokePuffs)!;
       }
 
-      const speed = 4.8 + Math.random() * 3.5;
+      const speed = 5.5 + Math.random() * 4.0;
       puff.position.set(
         pos.x + (Math.random() - 0.5) * 0.04,
         pos.y + (Math.random() - 0.5) * 0.04,
@@ -1111,20 +1443,23 @@ export class ParticleSystem {
       );
       puff.velocity.set(
         rearDir.x * speed + (Math.random() - 0.5) * 0.25,
-        rearDir.y * speed + 0.12,
+        rearDir.y * speed + 0.15,
         rearDir.z * speed + (Math.random() - 0.5) * 0.25
       );
-      puff.size = 0.15;
-      puff.maxSize = 0.62 + Math.random() * 0.25;
+      puff.size = 0.16;
+      puff.maxSize = 0.85 + Math.random() * 0.35;
       puff.rotation = Math.random() * Math.PI * 2;
-      puff.rotationSpeed = (Math.random() - 0.5) * 3.0;
-      puff.opacity = 0.38;
-      puff.maxOpacity = 0.38;
+      puff.rotationSpeed = (Math.random() - 0.5) * 3.5;
+      puff.opacity = 0.42;
+      puff.maxOpacity = 0.42;
       puff.life = 0;
-      puff.maxLife = 0.28 + Math.random() * 0.15;
+      puff.maxLife = 0.35 + Math.random() * 0.18;
       puff.colorR = 0.72;
       puff.colorG = 0.75;
       puff.colorB = 0.80;
+      puff.growthExponent = 0.38;
+      puff.buoyancy = 0.5;
+      puff.drag = 2.2;
 
       this.smokePuffs.push(puff);
     } else if (mode === 'backfire') {
@@ -1137,17 +1472,20 @@ export class ParticleSystem {
           puff = {
             position: new THREE.Vector3(),
             velocity: new THREE.Vector3(),
-            size: 0.28,
-            maxSize: 1.15,
+            size: 0.32,
+            maxSize: 1.5,
             rotation: 0,
             rotationSpeed: 0,
-            opacity: 0.88,
-            maxOpacity: 0.88,
+            opacity: 0.92,
+            maxOpacity: 0.92,
             life: 0,
-            maxLife: 0.38,
+            maxLife: 0.45,
             colorR: 0.14,
             colorG: 0.14,
             colorB: 0.16,
+            growthExponent: 0.35,
+            buoyancy: 0.6,
+            drag: 2.5,
           };
         } else {
           puff = this.popOldest(this.smokePuffs)!;
@@ -1159,21 +1497,24 @@ export class ParticleSystem {
           pos.z + (Math.random() - 0.5) * 0.08
         );
         puff.velocity.set(
-          rearDir.x * (8.5 + Math.random() * 5.5) + (Math.random() - 0.5) * 0.8,
-          0.45 + Math.random() * 0.45,
-          rearDir.z * (8.5 + Math.random() * 5.5) + (Math.random() - 0.5) * 0.8
+          rearDir.x * (9.5 + Math.random() * 6.5) + (Math.random() - 0.5) * 0.8,
+          0.55 + Math.random() * 0.55,
+          rearDir.z * (9.5 + Math.random() * 6.5) + (Math.random() - 0.5) * 0.8
         );
-        puff.size = 0.28;
-        puff.maxSize = 1.15 + Math.random() * 0.4;
+        puff.size = 0.32;
+        puff.maxSize = 1.5 + Math.random() * 0.5;
         puff.rotation = Math.random() * Math.PI * 2;
-        puff.rotationSpeed = (Math.random() - 0.5) * 4.5;
-        puff.opacity = 0.88;
-        puff.maxOpacity = 0.88;
+        puff.rotationSpeed = (Math.random() - 0.5) * 5.0;
+        puff.opacity = 0.92;
+        puff.maxOpacity = 0.92;
         puff.life = 0;
-        puff.maxLife = 0.38 + Math.random() * 0.18;
+        puff.maxLife = 0.45 + Math.random() * 0.22;
         puff.colorR = 0.14;
         puff.colorG = 0.14;
         puff.colorB = 0.16;
+        puff.growthExponent = 0.35;
+        puff.buoyancy = 0.6;
+        puff.drag = 2.5;
 
         this.smokePuffs.push(puff);
       }
@@ -1236,17 +1577,20 @@ export class ParticleSystem {
       puff = {
         position: new THREE.Vector3(),
         velocity: new THREE.Vector3(),
-        size: 0.6,
-        maxSize: 2.4,
+        size: 0.65,
+        maxSize: 3.2,
         rotation: 0,
         rotationSpeed: 0,
-        opacity: 0.6,
-        maxOpacity: 0.6,
+        opacity: 0.65,
+        maxOpacity: 0.65,
         life: 0,
-        maxLife: 1.3,
+        maxLife: 1.4,
         colorR: r,
         colorG: g,
         colorB: b,
+        growthExponent: 0.48,
+        buoyancy: 0.8,
+        drag: 1.2,
       };
     } else {
       puff = this.popOldest(this.smokePuffs)!;
@@ -1259,20 +1603,23 @@ export class ParticleSystem {
     );
     puff.velocity.set(
       (Math.random() - 0.5) * 0.6,
-      1.5 + Math.random() * 1.2,
+      1.8 + Math.random() * 1.4,
       (Math.random() - 0.5) * 0.6
     );
-    puff.size = 0.6;
-    puff.maxSize = isSevere ? 3.4 : 2.4;
+    puff.size = 0.65;
+    puff.maxSize = isSevere ? 4.2 : 3.0;
     puff.rotation = Math.random() * Math.PI * 2;
     puff.rotationSpeed = (Math.random() - 0.5) * 2.2;
-    puff.opacity = isSevere ? 0.9 : 0.6;
-    puff.maxOpacity = isSevere ? 0.9 : 0.6;
+    puff.opacity = isSevere ? 0.94 : 0.65;
+    puff.maxOpacity = isSevere ? 0.94 : 0.65;
     puff.life = 0;
-    puff.maxLife = 1.3 + Math.random() * 0.7;
+    puff.maxLife = 1.4 + Math.random() * 0.8;
     puff.colorR = r;
     puff.colorG = g;
     puff.colorB = b;
+    puff.growthExponent = 0.48;
+    puff.buoyancy = 0.8 + (isCritical ? 0.6 : 0.2);
+    puff.drag = 1.2;
 
     this.smokePuffs.push(puff);
 
@@ -1708,7 +2055,7 @@ export class ParticleSystem {
     }
     this.prevActiveScorches = this.scorchList.length;
 
-    // --- 5. Update Volumetric Smoke Puffs ---
+    // --- 5. Update Volumetric Smoke Puffs (GPU Instanced Attributes) ---
     for (let i = this.smokePuffs.length - 1; i >= 0; i--) {
       const p = this.smokePuffs[i];
       p.life += dt;
@@ -1719,51 +2066,132 @@ export class ParticleSystem {
         continue;
       }
 
-      p.velocity.x *= Math.max(0, 1.0 - 1.2 * dt);
-      p.velocity.z *= Math.max(0, 1.0 - 1.2 * dt);
-      p.position.addScaledVector(p.velocity, dt);
-      p.rotation += p.rotationSpeed * dt;
-    }
+      // Aerodynamic wake entrainment on smoke clouds
+      if (hasCarAero) {
+        const dx = p.position.x - carPos!.x;
+        const dz = p.position.z - carPos!.z;
+        const localZ = dx * carForward!.x + dz * carForward!.z;
+        const localX = dx * carRightX + dz * carRightZ;
 
-    if (this.smokePuffs.length > 0 || this.prevActiveSmoke > 0) {
-      const maxActive = Math.max(this.smokePuffs.length, this.prevActiveSmoke);
-      for (let i = 0; i < maxActive; i++) {
-        const pIdx = i * 3;
-        const cIdx = i * 4;
-
-        if (i < this.smokePuffs.length) {
-          const p = this.smokePuffs[i];
-          this.smokePositions[pIdx] = p.position.x;
-          this.smokePositions[pIdx + 1] = p.position.y;
-          this.smokePositions[pIdx + 2] = p.position.z;
-
-          const progress = p.life / p.maxLife;
-          const alpha = p.maxOpacity * Math.sin(progress * Math.PI);
-
-          this.smokeColors[cIdx] = p.colorR;
-          this.smokeColors[cIdx + 1] = p.colorG;
-          this.smokeColors[cIdx + 2] = p.colorB;
-          this.smokeColors[cIdx + 3] = alpha;
-        } else {
-          this.smokePositions[pIdx] = 0;
-          this.smokePositions[pIdx + 1] = -1000;
-          this.smokePositions[pIdx + 2] = 0;
-          this.smokeColors[cIdx + 3] = 0;
+        if (localZ > -6.0 && localZ < 1.0 && Math.abs(localX) < 3.0) {
+          const wakeFactor = Math.exp(-(localZ * localZ) / 12.0);
+          p.velocity.x += -Math.sign(localX) * carSpeed * 0.8 * wakeFactor * dt;
+          p.velocity.z += -Math.sign(localX) * carSpeed * 0.8 * wakeFactor * dt;
+          p.velocity.x += carForward!.x * carSpeed * 0.18 * wakeFactor * dt;
+          p.velocity.z += carForward!.z * carSpeed * 0.18 * wakeFactor * dt;
+          p.velocity.y += carSpeed * 0.08 * wakeFactor * dt;
         }
       }
 
-      const posAttr = this.smokePoints.geometry.attributes.position as THREE.BufferAttribute;
-      const colAttr = this.smokePoints.geometry.attributes.color as THREE.BufferAttribute;
+      // Air resistance and thermal buoyancy
+      const dragFactor = Math.max(0, 1.0 - (p.drag || 1.3) * dt);
+      p.velocity.x *= dragFactor;
+      p.velocity.z *= dragFactor;
+      p.velocity.y += (p.buoyancy || 0.35) * dt;
+      p.position.addScaledVector(p.velocity, dt);
+
+      // Floor boundary with gentle deceleration
+      if (p.position.y < 0.02) {
+        p.position.y = 0.02;
+        p.velocity.y = Math.max(0, p.velocity.y * 0.5);
+      }
+
+      p.rotation += p.rotationSpeed * dt;
+    }
+
+    const activeSmoke = this.smokePuffs.length;
+    this.smokeTime += dt;
+    if (this.smokeMaterial && this.smokeMaterial.uniforms.uTime) {
+      this.smokeMaterial.uniforms.uTime.value = this.smokeTime;
+    }
+    if (activeSmoke > 0 || this.prevActiveSmoke > 0) {
+      const updateLimit = Math.max(activeSmoke, this.prevActiveSmoke);
+      for (let i = 0; i < updateLimit; i++) {
+        const pIdx = i * 3;
+        const paramIdx = i * 4;
+        const colIdx = i * 4;
+        const vIdx = i * 3;
+
+        if (i < activeSmoke) {
+          const p = this.smokePuffs[i];
+          this.smokeInstPos[pIdx] = p.position.x;
+          this.smokeInstPos[pIdx + 1] = p.position.y;
+          this.smokeInstPos[pIdx + 2] = p.position.z;
+
+          const progress = p.life / p.maxLife;
+
+          // Non-linear volumetric expansion: fast thermal pop, steady billow
+          const growth = Math.pow(progress, p.growthExponent || 0.45);
+          const currentSize = p.size + (p.maxSize - p.size) * growth;
+
+          // Smooth attack / sustain / cubic fade-out
+          let opacityEnvelope: number;
+          if (progress < 0.10) {
+            opacityEnvelope = (progress / 0.10);
+          } else if (progress < 0.45) {
+            opacityEnvelope = 1.0;
+          } else {
+            const decayT = (progress - 0.45) / 0.55;
+            opacityEnvelope = Math.pow(1.0 - decayT, 1.6);
+          }
+          const currentOpacity = p.maxOpacity * opacityEnvelope;
+
+          this.smokeInstParams[paramIdx] = currentSize;
+          this.smokeInstParams[paramIdx + 1] = p.rotation;
+          this.smokeInstParams[paramIdx + 2] = currentOpacity;
+          this.smokeInstParams[paramIdx + 3] = progress;
+
+          this.smokeInstColor[colIdx] = p.colorR;
+          this.smokeInstColor[colIdx + 1] = p.colorG;
+          this.smokeInstColor[colIdx + 2] = p.colorB;
+          this.smokeInstColor[colIdx + 3] = 1.0;
+
+          this.smokeInstVel[vIdx] = p.velocity.x;
+          this.smokeInstVel[vIdx + 1] = p.velocity.y;
+          this.smokeInstVel[vIdx + 2] = p.velocity.z;
+        } else {
+          this.smokeInstPos[pIdx] = 0;
+          this.smokeInstPos[pIdx + 1] = -99999;
+          this.smokeInstPos[pIdx + 2] = 0;
+
+          this.smokeInstParams[paramIdx] = 0;
+          this.smokeInstParams[paramIdx + 1] = 0;
+          this.smokeInstParams[paramIdx + 2] = 0.0;
+          this.smokeInstParams[paramIdx + 3] = 1.0;
+
+          this.smokeInstColor[colIdx] = 1;
+          this.smokeInstColor[colIdx + 1] = 1;
+          this.smokeInstColor[colIdx + 2] = 1;
+          this.smokeInstColor[colIdx + 3] = 0;
+
+          this.smokeInstVel[vIdx] = 0;
+          this.smokeInstVel[vIdx + 1] = 0;
+          this.smokeInstVel[vIdx + 2] = 0;
+        }
+      }
+
+      const posAttr = this.smokeInstGeo.getAttribute('aInstancePos') as THREE.InstancedBufferAttribute;
+      const paramsAttr = this.smokeInstGeo.getAttribute('aInstanceParams') as THREE.InstancedBufferAttribute;
+      const colAttr = this.smokeInstGeo.getAttribute('aInstanceColor') as THREE.InstancedBufferAttribute;
+      const velAttr = this.smokeInstGeo.getAttribute('aInstanceVel') as THREE.InstancedBufferAttribute;
 
       posAttr.clearUpdateRanges();
-      posAttr.addUpdateRange(0, maxActive * 3);
+      posAttr.addUpdateRange(0, updateLimit * 3);
       posAttr.needsUpdate = true;
 
+      paramsAttr.clearUpdateRanges();
+      paramsAttr.addUpdateRange(0, updateLimit * 4);
+      paramsAttr.needsUpdate = true;
+
       colAttr.clearUpdateRanges();
-      colAttr.addUpdateRange(0, maxActive * 4);
+      colAttr.addUpdateRange(0, updateLimit * 4);
       colAttr.needsUpdate = true;
+
+      velAttr.clearUpdateRanges();
+      velAttr.addUpdateRange(0, updateLimit * 3);
+      velAttr.needsUpdate = true;
     }
-    this.prevActiveSmoke = this.smokePuffs.length;
+    this.prevActiveSmoke = activeSmoke;
   }
 
   /**
@@ -1915,9 +2343,9 @@ export class ParticleSystem {
       this.sparkMesh.geometry.dispose();
       (this.sparkMesh.material as THREE.Material).dispose();
     }
-    if (this.smokePoints) {
-      this.smokePoints.geometry.dispose();
-      (this.smokePoints.material as THREE.Material).dispose();
+    if (this.smokeMesh) {
+      this.smokeMesh.geometry.dispose();
+      if (this.smokeMaterial) this.smokeMaterial.dispose();
     }
     if (this.debrisMesh) {
       this.debrisMesh.geometry.dispose();
